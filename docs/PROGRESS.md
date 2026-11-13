@@ -1,5 +1,7 @@
 # Progreso
 
+2026-11-13: publicado el repositorio en GitHub sin datos del juego, código generado ni el icono derivado de la referencia (sustituido por un marcador neutro). Añadidos perfiles del supervisor para compilar el arnés de tiempo en ARM64 y ejecutarlo en una sola sesión ADB; 19 pruebas del supervisor pasaron y la comparación en Windows x64 se repitió sin cambios. En el S25 coincidieron 256 + 12 casos frente a Unicorn y los cuatro fallos esperados; limpieza confirmada. Ver `docs/evidence/S25_TIME_CANDIDATE.md`.
+
 2026-11-13: un intento de la prueba de despacho se interrumpió por reinicio de ADB durante `mkdir`; una inspección posterior de solo lectura no encontró directorios temporales del proyecto. Preparado un perfil de una sesión con transferencia acotada, validación sintáctica, hash y limpieza confirmada; 16 pruebas del supervisor pasaron. El intento real sigue aplazado por memoria libre insuficiente.
 
 2026-11-13: endurecido el perfil ADB ante caídas de RAM durante la prueba: el mínimo inicial es 1536 MiB, se detienen operaciones por debajo de 1024 MiB y se mantiene la limpieza. Pasaron diez pruebas del supervisor, incluida la limpieza simulada tras una caída de memoria. La prueba ARM64 de despacho sigue pendiente en el S25.

@@ -8,7 +8,7 @@ uint32_t g_eax,g_ebx,g_ecx,g_edx,g_esi,g_edi,g_ebp,g_esp,g_cur_func;
 ptrdiff_t g_mem_base;
 uint32_t g_icall_trace[ICALL_TRACE_SIZE],g_icall_from[ICALL_TRACE_SIZE],g_icall_trace_idx,g_icall_count;
 mh_guest_memory mh_recomp_region;
-__declspec(align(8)) static uint8_t guest[0x900000];
+static _Alignas(8) uint8_t guest[0x900000];
 void mh_guest_fault(uint32_t a,size_t n){exit(a==0x11a8 && n==4?70:(a==0xc && n==4?71:79));}
 void mh_dispatch_fault(uint32_t a,uint32_t b){exit(a==0 && b==0x6081a0?74:(a==0 && b==0x604dc0?75:79));}
 void sub_00648540(void){if(MEM32(g_esp)!=0x6081ad)exit(80);g_edx=MEM32(g_esp);g_esp+=4;g_esp-=0x12ac;}

@@ -220,5 +220,20 @@ class WorkSafeTests(unittest.TestCase):
    with patch.object(worksafe,'ROOT',root),patch.object(worksafe,'available_memory_mb',return_value=2048),patch.object(worksafe,'_run_job',side_effect=fake):
     with self.assertRaises(worksafe.WorkSafeError): worksafe.install_diagnostic_on_s25()
    self.assertEqual(calls,['diagnostic-device-list','diagnostic-install-preflight'])
+ def test_time_device_script_is_valid_and_bounded(self):
+  script=worksafe._time_device_script('/data/local/tmp/mhae_0123456789abcdef','a'*64,'QUJD').decode('ascii')
+  shell=Path(worksafe.os.environ.get('ProgramFiles',r'C:\Program Files'))/'Git'/'bin'/'sh.exe'
+  if shell.is_file():
+   cfg=json.loads((worksafe.ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+   r=worksafe._run_job([str(shell),'-n'],15,'test-time-shell-syntax',cfg,max_processes=2,memory_mb=256,input_bytes=script.encode('ascii'))
+   self.assertEqual(r['returncode'],0)
+  self.assertIn('rm -f "$p" && rmdir "$d"',script);self.assertNotIn('rm -r',script)
+  for mode,code in (('null-object',70),('missing-timer',74),('missing-virtual',75),('null-virtual-object',71)):
+   self.assertIn(f'"$p" --{mode} >/dev/null; rc=$?\nif [ "$rc" -ne {code} ]',script)
+ def test_time_device_output_sections(self):
+  text='MHAE_MODEL=SM-S938B\r\nMHAE_BEGIN_MAIN\r\n{"a":1}\r\n{"a":2}\r\nMHAE_END_MAIN\r\nMHAE_BEGIN_ZERO\r\n{"b":1}\r\nMHAE_END_ZERO\r\nMHAE_TESTS_PASSED\r\n'
+  parts=worksafe._split_time_device_output(text)
+  self.assertEqual(parts['MAIN'],'{"a":1}\n{"a":2}\n');self.assertEqual(parts['ZERO'],'{"b":1}\n')
+  with self.assertRaises(worksafe.WorkSafeError):worksafe._split_time_device_output('MHAE_BEGIN_MAIN\n{}\n')
 
 if __name__ == '__main__': unittest.main(verbosity=2)

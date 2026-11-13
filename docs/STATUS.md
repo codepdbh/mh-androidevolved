@@ -1,5 +1,7 @@
 # Estado técnico
 
+Avance posterior: la candidata de tiempo con sus seis dependencias traducidas se ejecutó por primera vez en ARM64, en el S25, dentro de un arnés aislado. Coincidieron con la referencia x86 de Unicorn los 256 casos principales y los 12 de la rama de argumento cero, y los cuatro fallos controlados devolvieron los códigos esperados; se confirmó la limpieza. Las demás dependencias siguen simuladas y el código no está integrado en la APK; el juego sigue sin arrancar. Ver `docs/evidence/S25_TIME_CANDIDATE.md`.
+
 Avance posterior: una prueba aislada de la rama de argumento cero de la dependencia indirecta coincidió en 12 casos adicionales frente a Unicorn, con dos métodos virtuales simulados. El objeto ARM64 combinado sigue sin ejecutarse en Android y las implementaciones virtuales reales están pendientes.
 
 Avance posterior: se comprobaron dos fallos adicionales de la ruta virtual de la candidata: objeto nulo y destino ausente. Los accesos fueron detenidos o rechazados en los puntos esperados, con la salvedad de que el despacho no reproduce todo el estado de excepción x86. Se mantienen las 256 comparaciones observadas y el objeto combinado sigue sin ejecutarse en Android.
