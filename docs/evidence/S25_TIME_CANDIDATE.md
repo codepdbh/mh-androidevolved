@@ -40,3 +40,11 @@ Se tradujo `0x648540`, que redondea `eax` a múltiplo de cuatro y continúa en `
 - SHA-256 del binario ARM64: `f55e6a33e101df70601cebb845d34cc00cdb4dd6133029c29867f2b8ee0f830e`.
 - Resultado en el S25 `SM-S938B`: 256 + 12 casos coinciden con Unicorn; fallos 70 / 74 / 75 / 71; limpieza confirmada. Windows x64 también coincidió.
 - Límite: las páginas de guarda de Windows no se modelan; los toques de página son accesos comprobados normales.
+
+## Quinta ejecución: dependencia x87
+
+Se tradujeron `0x5daa50` y `0x5ea2b0` con dos reescrituras auditadas: cinco accesos `*(float*)ADDR` a `MEMF` y la división de `fdivp` a IEEE. Según `mode`, las entradas flotantes son valores simples, divisor cero en la segunda división, valores negativos e inexactos, o divisores cero en ambas. Se comparan los dos flotantes resultantes por patrón de bits, el argumento y las llamadas a los dobles de `0x5db0d0` y `0x482f20`, y la profundidad final de la pila x87.
+
+- SHA-256 del binario ARM64: `7ee1d5cceb0a7131c533f143dcab798b7e8d8044d8b8002602243de242892056`.
+- Resultado en el S25 `SM-S938B`: 256 + 12 casos coinciden con Unicorn, incluidos `-inf` en ambas divisiones; fallos 70 / 74 / 75 / 71; limpieza confirmada. Windows x64 también coincidió.
+- Límites: no se generó ningún NaN; no se modelan la precisión extendida, los flags de estado ni las excepciones x87.

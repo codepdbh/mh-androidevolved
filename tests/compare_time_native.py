@@ -13,12 +13,12 @@ if not re.fullmatch(r'[a-z0-9-]{1,32}',platform):raise SystemExit('invalid platf
 actual=[json.loads(line) for line in source.read_text(encoding='utf-8').splitlines()]
 if len(actual)!=len(reference['cases']):raise SystemExit('case count mismatch')
 for i,(want,got) in enumerate(zip(reference['cases'],actual)):
-    for field in ('tick','result','guard','alignment','mode','stack_hex','object_hex','copy_hex','structure_hex','global_value','small_dep_value','inner_dep_value','global_a_after','global_b_after','tick_after','branch_calls','copy_out_hex'):
+    for field in ('tick','result','guard','alignment','mode','stack_hex','object_hex','copy_hex','structure_hex','global_value','small_dep_value','inner_dep_value','global_a_after','global_b_after','tick_after','branch_calls','copy_out_hex','float_a','float_b','x87_arg','x87_calls','x87_tail_calls','fp_top'):
         if want[field]!=got[field]:raise SystemExit(f'case {i}: {field} differs')
     for reg in ('eax','ebx','ecx','edx','esi','edi','ebp','esp'):
         if want['registers'][reg]!=got['registers'][reg]:raise SystemExit(f'case {i}: {reg} differs')
     if (want['registers']['eflags']&0x8d5)!=(got['registers']['eflags']&0x8d5):raise SystemExit(f'case {i}: arithmetic flags differ')
-(base/('short_comparison_report.json' if platform=='windows-x64' else f'short_comparison_report_{platform}.json')).write_text(json.dumps({'cases':len(actual),'scope':'isolated candidate and ten translated dependencies, remaining dependencies synthetic; both exits',
+(base/('short_comparison_report.json' if platform=='windows-x64' else f'short_comparison_report_{platform}.json')).write_text(json.dumps({'cases':len(actual),'scope':'isolated candidate and twelve translated dependencies, remaining dependencies synthetic; both exits',
     'compared':['general registers','six arithmetic flags','observed stack','object prefix','copied buffer','global and timer state'],
     'platform':platform,'limitations':['no real APIs','not exhaustive','not whole game']+([] if platform.startswith('android') else ['not Android'])},indent=2)+'\n',encoding='utf-8')
 print(len(actual),'synthetic cases match in observed state')

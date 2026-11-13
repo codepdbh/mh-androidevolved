@@ -2,10 +2,11 @@
 import hashlib,json,struct,sys
 import pefile
 from unicorn import Uc,UcError,UC_ARCH_X86,UC_MODE_32,UC_HOOK_MEM_INVALID,UC_ERR_READ_UNMAPPED,UC_ERR_FETCH_UNMAPPED
-from unicorn.x86_const import UC_X86_REG_EAX,UC_X86_REG_EBX,UC_X86_REG_ECX,UC_X86_REG_EDX,UC_X86_REG_ESI,UC_X86_REG_EDI,UC_X86_REG_EBP,UC_X86_REG_ESP,UC_X86_REG_EIP,UC_X86_REG_EFLAGS
+from unicorn.x86_const import UC_X86_REG_EAX,UC_X86_REG_EBX,UC_X86_REG_ECX,UC_X86_REG_EDX,UC_X86_REG_ESI,UC_X86_REG_EDI,UC_X86_REG_EBP,UC_X86_REG_ESP,UC_X86_REG_EIP,UC_X86_REG_EFLAGS,UC_X86_REG_FPSW
 from inspect_entrypoint import ROOT,GAME,EXPECTED
 
 COPY_OBJECTS=((0,0,0,0,0,0),(0x8a2001,7,0,0,1,0),(0,0,0x8a2402,0x23,0,1),(0x8a2000,0x40,0x8a2403,0x31,1,1))
+X87_INPUTS=((0x3fc00000,0x40400000,640,0x3f000000,2),(0x3fc00000,0x40400000,0,0,1),(0xbe800000,0x40e00000,0xfffffffd,0x3dcccccd,2),(0x40000000,0,1,0x3f800000,0))
 REGS={'eax':UC_X86_REG_EAX,'ebx':UC_X86_REG_EBX,'ecx':UC_X86_REG_ECX,'edx':UC_X86_REG_EDX,
       'esi':UC_X86_REG_ESI,'edi':UC_X86_REG_EDI,'ebp':UC_X86_REG_EBP,'esp':UC_X86_REG_ESP,'eflags':UC_X86_REG_EFLAGS}
 def main():
@@ -20,6 +21,8 @@ def main():
     if branch_report['address']!='0x5daa20' or branch_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected dispatcher report')
     memcpy_report=json.loads((base/'dependencies/memcpy_report.json').read_text())
     if [x['address'] for x in memcpy_report['items']]!=['0x481340','0x611640'] or memcpy_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected buffer copy report')
+    x87_report=json.loads((base/'dependencies/x87_report.json').read_text())
+    if [x['address'] for x in x87_report['items']]!=['0x5daa50','0x5ea2b0'] or x87_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected x87 report')
     probe_report=json.loads((base/'dependencies/stack_probe_report.json').read_text())
     if probe_report['address']!='0x648540' or probe_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected stack probe report')
     pe=pefile.PE(data=data,fast_load=True);page=pe.get_data(0x608000-pe.OPTIONAL_HEADER.ImageBase,0x1000)
@@ -48,9 +51,8 @@ def main():
         setter=pe.get_data(0x604f30-pe.OPTIONAL_HEADER.ImageBase,10)
         if setter!=bytes.fromhex('8b442404894108c20400'):raise SystemExit('setter bytes differ')
         cpu.mem_write(0x604f30,setter)
-        cpu.mem_write(0x5daa50,b'\xc3')
-        # Real buffer copy dependency 0x481340 and its copy routine 0x611640, checked against the lift report.
-        for item in memcpy_report['items']:
+        # Real buffer copy (0x481340, 0x611640) and x87 (0x5daa50, 0x5ea2b0) dependencies, checked against their lift reports.
+        for item in memcpy_report['items']+x87_report['items']:
             address=int(item['address'],16);code=pe.get_data(address-pe.OPTIONAL_HEADER.ImageBase,item['bytes_length'])
             if hashlib.sha256(code).hexdigest()!=item['bytes_sha256']:raise SystemExit('buffer copy bytes differ')
             cpu.mem_write(address,code)
@@ -60,6 +62,9 @@ def main():
         cpu.mem_write(0x5daa20,dispatcher)
         cpu.mem_write(0x476a80,b'\x83\x05\x00\x00\x8a\x00\x01\xc3')              # add dword [0x8a0000],1; ret
         cpu.mem_write(0x476aa0,b'\x81\x05\x00\x00\x8a\x00\x00\x01\x00\x00\xc3')  # add dword [0x8a0000],0x100; ret
+        # Callees of 0x5daa50: push [esp+4]; pop [0x8a0004]; add [0x8a0008],1; ret  /  add [0x8a000c],1; ret
+        cpu.mem_write(0x5db0d0,b'\xff\x74\x24\x04\x8f\x05\x04\x00\x8a\x00\x83\x05\x08\x00\x8a\x00\x01\xc3')
+        cpu.mem_write(0x482f20,b'\x83\x05\x0c\x00\x8a\x00\x01\xc3')
         cpu.mem_write(0x800100,b'\xa1\x00\x00\x81\x00\x8d\x50\x28\x89\x15\x00\x00\x81\x00\xc3')
         cpu.mem_write(0x81b4fc,struct.pack('<I',0 if missing_timer else 0x800100));cpu.mem_write(0x810000,struct.pack('<I',tick))
         cpu.mem_write(0x736db8,struct.pack('<I',0 if null_virtual else 0x820000));cpu.mem_write(0x82000c,struct.pack('<I',0x821000))
@@ -74,6 +79,8 @@ def main():
         cpu.mem_write(0x71a860,bytes((i*3+1)&255 for i in range(0x100)))
         cpu.mem_write(0x71c87c,struct.pack('<I',0x8a1000 if has_a else 0));cpu.mem_write(0x71c880,struct.pack('<I',0x8a1400 if has_b else 0))
         for address,value in ((0x8a1170,a_dst),(0x8a11b8,a_size),(0x8a1570,b_dst),(0x8a15b8,b_size)):cpu.mem_write(address,struct.pack('<I',value))
+        # Same x87 inputs as the C harness, selected by mode.
+        for address,value in zip((0x7c8a78,0x7c95a0,0x7c8a74,0x7c908c,0x7d34f8),X87_INPUTS[mode]):cpu.mem_write(address,struct.pack('<I',value))
         for name,value in [('eax',0x11111111),('ebx',0x22222222),('ecx',0 if null_object else 0x870000),('edx',0x33333333),
                            ('esi',0x44444444),('edi',0x55555555),('ebp',0x66666666),('esp',0x880000+alignment),('eflags',2)]:cpu.reg_write(REGS[name],value)
         faults=[]
@@ -97,8 +104,12 @@ def main():
                       'structure_hex':bytes(cpu.mem_read(0x7d6ae4,0x10ec)).hex(),
                       'tick_after':struct.unpack('<I',cpu.mem_read(0x810000,4))[0],
                       'branch_calls':struct.unpack('<I',cpu.mem_read(0x8a0000,4))[0],
-                      'copy_out_hex':bytes(cpu.mem_read(0x8a2000,0x500)).hex()})
+                      'copy_out_hex':bytes(cpu.mem_read(0x8a2000,0x500)).hex(),
+                      'float_a':struct.unpack('<I',cpu.mem_read(0x7d3510,4))[0],'float_b':struct.unpack('<I',cpu.mem_read(0x7c8fec,4))[0],
+                      'x87_arg':struct.unpack('<I',cpu.mem_read(0x8a0004,4))[0],'x87_calls':struct.unpack('<I',cpu.mem_read(0x8a0008,4))[0],
+                      'x87_tail_calls':struct.unpack('<I',cpu.mem_read(0x8a000c,4))[0],
+                      'fp_top':(cpu.reg_read(UC_X86_REG_FPSW)>>11)&7})
     (base/'x86_short_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'candidate_source_sha256':report['source_sha256'],
-        'scope':'isolated candidate, ten actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
+        'scope':'isolated candidate, twelve actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
     print(len(cases),'isolated x86 reference cases recorded')
 if __name__=='__main__':main()

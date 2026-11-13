@@ -1,5 +1,7 @@
 # Problemas conocidos
 
+- PCRecomp traduce `fdivp` con una protección que devuelve el dividendo si el divisor es cero; x87 produce ±inf o NaN. Se corrigió solo en `0x5daa50`; cualquier otra traducción con `fdivp` necesita la misma revisión. La FPU se modela con `double` del host, no con precisión extendida de 80 bits ni el control de precisión que Direct3D suele fijar. Hipótesis sin verificar: un `0/0` produce en x87 el NaN indefinido negativo (`0xffc00000`) y en ARM64 el NaN por defecto positivo (`0x7fc00000`); las pruebas actuales no generan NaN.
+
 Actualización posterior: la selección de carpeta y las llamadas JNI de diagnóstico completaron en el S25. No se ha probado la ejecución del juego y los datos ajenos al ejecutable no se han verificado individualmente.
 
 Actualización: se instaló y arrancó una APK privada de diagnóstico en el S25 y la prueba sintética ARM64 de despacho pasó. Los puntos siguientes sobre ausencia de APK y de pruebas de despacho en Android se refieren al estado anterior; siguen pendientes la selección de carpeta, la inspección JNI en pantalla y una implementación capaz de arrancar el juego.
