@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 #include "guest_memory.h"
 
 extern mh_guest_memory mh_recomp_region;
@@ -57,4 +58,35 @@ static inline uint32_t mh_recomp_pop32(uint32_t *sp) {
     uint32_t value=MEM32(*sp); *sp+=4; return value;
 }
 #define POP32_VAL(sp) mh_recomp_pop32(&(sp))
+
+/* Checked replacement for recomp_rep_movs. Both whole ranges are validated
+ * before any byte is written, so an out-of-range copy faults without the
+ * partial progress real x86 would make. Overlap keeps x86 element order. */
+static inline void mh_recomp_rep_movs(uint32_t edi, uint32_t esi, uint32_t n, uint32_t esz, int df) {
+    uint64_t total = (uint64_t)n * esz;
+    uint32_t b, dst_start, src_start;
+    uint8_t *dst, *src;
+    if (!n) return;
+    if ((esz != 1 && esz != 2 && esz != 4) || total > UINT32_MAX) {
+        mh_guest_fault(edi, (size_t)esz);
+        abort();
+    }
+    b = (uint32_t)total;
+    dst_start = df > 0 ? edi : edi - b + esz;
+    src_start = df > 0 ? esi : esi - b + esz;
+    if (df <= 0 && (edi + esz < b || esi + esz < b)) {
+        mh_guest_fault(edi, (size_t)esz);
+        abort();
+    }
+    dst = (uint8_t *)mh_recomp_access(dst_start, b);
+    src = (uint8_t *)mh_recomp_access(src_start, b);
+    if (df > 0 ? (uint32_t)(edi - esi) >= b : (uint32_t)(esi - edi) >= b) {
+        memmove(dst, src, b);
+        return;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t k = df > 0 ? i * esz : b - (i + 1) * esz;
+        memcpy(dst + k, src + k, esz);
+    }
+}
 #endif

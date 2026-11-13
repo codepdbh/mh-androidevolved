@@ -289,6 +289,16 @@ def lift_time_branch_dependency():
     if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('mode dispatcher lift failed')
     return result
 
+def lift_time_memcpy_dependency():
+    """Lift 0x481340 and its copy routine 0x611640 as private C with checked rep movs."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_memcpy_dependency.py')],45,'time-memcpy-lift',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('buffer copy dependency lift failed')
+    return result
+
 def lift_time_indirect_dependency():
     """Lift one bounded indirect-call candidate without executing it."""
     import sys
@@ -364,6 +374,12 @@ def _check_time_harness_sources(base):
     branch_report=json.loads((base/'dependencies/branch_report.json').read_text())
     branch_source=(base/'dependencies/dep_005daa20_precise.c').read_text(encoding='utf-8').removesuffix('\n')
     if branch_report['address']!='0x5daa20' or hashlib.sha256(branch_source.encode()).hexdigest()!=branch_report['adapted_sha256']:raise WorkSafeError('dispatcher source hash mismatch')
+    memcpy_report=json.loads((base/'dependencies/memcpy_report.json').read_text())
+    if [x['address'] for x in memcpy_report['items']]!=['0x481340','0x611640']:raise WorkSafeError('unexpected buffer copy dependency set')
+    for item in memcpy_report['items']:
+        if item['source'] not in ('dep_00481340_precise.c','dep_00611640_precise.c'):raise WorkSafeError('unexpected buffer copy filename')
+        content=(base/'dependencies'/item['source']).read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(content.encode()).hexdigest()!=item['adapted_sha256']:raise WorkSafeError('buffer copy source hash mismatch')
 
 def compare_time_candidate_native():
     """Compile an isolated private C candidate with test doubles and compare it."""
@@ -371,7 +387,7 @@ def compare_time_candidate_native():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency()
+    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency();lift_time_memcpy_dependency()
     vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231'
     kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits/10';version='10.0.26100.0'
     cl=vs/'bin/Hostx64/x64/cl.exe';inc=[vs/'include',kits/'Include'/version/'ucrt',kits/'Include'/version/'shared',kits/'Include'/version/'um']
@@ -425,7 +441,7 @@ def build_time_candidate_arm64_test():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency()
+    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency();lift_time_memcpy_dependency()
     base,out=_time_arm64_paths();_check_time_harness_sources(base)
     ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
@@ -1435,6 +1451,31 @@ def test_checked_dispatch():
         results[name]=result
         if result['timed_out'] or result['returncode']!=expected:raise WorkSafeError('dispatch test failed: '+name)
     return {'build':built,'tests':results}
+
+def _msvc_env():
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio'/'18'/'Community'/'VC'/'Tools'/'MSVC'/'14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits'/'10'
+    cl=vs/'bin'/'Hostx64'/'x64'/'cl.exe';sdk='10.0.26100.0'
+    include=[vs/'include',kits/'Include'/sdk/'ucrt',kits/'Include'/sdk/'shared',kits/'Include'/sdk/'um']
+    lib=[vs/'lib'/'x64',kits/'Lib'/sdk/'ucrt'/'x64',kits/'Lib'/sdk/'um'/'x64']
+    if not cl.is_file() or not all(p.is_dir() for p in include+lib): raise WorkSafeError('MSVC toolchain or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,include));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    return cl,env
+
+def test_checked_rep_movs():
+    """Compile and run synthetic checks of the checked rep movs helper; no game code."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    cl,env=_msvc_env()
+    output=ROOT/'build'/'rep-movs-test';output.mkdir(parents=True,exist_ok=True);exe=output/'rep-movs-test.exe'
+    argv=[str(cl),'/nologo','/Od','/std:c11','/W4','/I',str(ROOT/'recomp'),'/I',str(ROOT/'runtime'),'/Fo'+str(output)+'\\','/Fe'+str(exe),
+          str(ROOT/'tests'/'test_checked_rep_movs.c'),str(ROOT/'runtime'/'guest_memory.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'rep-movs-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('rep movs test build failed; inspect rep-movs-build logs')
+    ran=_run_job([str(exe)],30,'rep-movs-run',cfg,max_processes=1,memory_mb=256)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('rep movs test failed with code '+str(ran['returncode']))
+    return {'build':built,'run':ran}
 
 def probe_graphics_x86(modes=False, null_case=False, multi=False):
     import sys

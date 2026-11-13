@@ -1,5 +1,7 @@
 # Progreso
 
+2026-11-13: traducidas `0x481340` y `0x611640` como octava y novena dependencias de la candidata de tiempo. Añadido `mh_recomp_rep_movs` al adaptador de memoria comprobada, con prueba propia (`test_checked_rep_movs()`, también en CTest): 20 160 casos y cuatro rechazos. La herramienta de traducción rechaza cualquier helper del runtime sin comprobar. Coincidieron 256 + 12 casos y cuatro fallos en Windows x64 y en el S25; 19 pruebas del supervisor pasaron.
+
 2026-11-13: traducido el selector de modo `0x5daa20` como séptima dependencia real de la candidata de tiempo, con verificación de las nueve instrucciones y de los bytes en la sonda x86. Coincidieron 256 + 12 casos y cuatro fallos en Windows x64 y en el S25 (ARM64), cubriendo ambas ramas del selector; 19 pruebas del supervisor pasaron.
 
 2026-11-13: publicado el repositorio en GitHub sin datos del juego, código generado ni el icono derivado de la referencia (sustituido por un marcador neutro). Añadidos perfiles del supervisor para compilar el arnés de tiempo en ARM64 y ejecutarlo en una sola sesión ADB; 19 pruebas del supervisor pasaron y la comparación en Windows x64 se repitió sin cambios. En el S25 coincidieron 256 + 12 casos frente a Unicorn y los cuatro fallos esperados; limpieza confirmada. Ver `docs/evidence/S25_TIME_CANDIDATE.md`.

@@ -25,3 +25,10 @@ Se añadió la traducción del selector de modo `0x5daa20` (`tools/lift_time_bra
 
 - SHA-256 del binario ARM64: `aff80538e1fe9ed4e4d2df6f9880198ea3035beb977b89b06d52c9c22061614a`.
 - Resultado en el S25 `SM-S938B`: 256 casos principales y 12 de argumento cero coinciden con Unicorn; los cuatro fallos devolvieron 70 / 74 / 75 / 71; limpieza confirmada. La comparación en Windows x64 también coincidió.
+
+## Tercera ejecución: copias de búfer
+
+Se tradujeron `0x481340` y su rutina de copia `0x611640` (`tools/lift_time_memcpy_dependency.py`); los tres `rep movs` usan el helper comprobado `mh_recomp_rep_movs`. Según el índice de reloj, el arnés configura ningún objeto, solo A (7 bytes a destino desalineado, ruta de bytes), solo B (35 bytes, ruta de alineación más palabras) o ambos (64 y 49 bytes). Se compara además la región destino (`copy_out_hex`).
+
+- SHA-256 del binario ARM64: `3240db25e5ad249d2aab024af14de002c9bece3b1d1c59a1bcfa3aba8a1f70b0`.
+- Resultado en el S25 `SM-S938B`: 256 + 12 casos coinciden con Unicorn; fallos 70 / 74 / 75 / 71; limpieza confirmada. Windows x64 también coincidió.
