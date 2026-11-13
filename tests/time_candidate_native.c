@@ -11,7 +11,9 @@ mh_guest_memory mh_recomp_region;
 static _Alignas(8) uint8_t guest[0x900000];
 void mh_guest_fault(uint32_t a,size_t n){exit(a==0x11a8 && n==4?70:(a==0xc && n==4?71:79));}
 void mh_dispatch_fault(uint32_t a,uint32_t b){exit(a==0 && b==0x6081a0?74:(a==0 && b==0x604dc0?75:79));}
+#ifndef MH_REAL_SMALL_DEPS
 void sub_00648540(void){if(MEM32(g_esp)!=0x6081ad)exit(80);g_edx=MEM32(g_esp);g_esp+=4;g_esp-=0x12ac;}
+#endif
 static uint32_t mock_result;
 void sub_00605750(void){if(MEM32(g_esp)!=0x608211)exit(81);g_eax=mock_result;g_esp+=64;}
 #ifndef MH_REAL_SMALL_DEPS
@@ -49,6 +51,7 @@ void sub_00401030(void);void sub_004932F0(void);void sub_00493230(void);
 #include "dependencies/dep_005daa20_precise.c"
 #include "dependencies/dep_00611640_precise.c"
 #include "dependencies/dep_00481340_precise.c"
+#include "dependencies/dep_00648540.c"
 #endif
 /* Mode selector for 0x5daa20 per alignment: first call, second call, neither, pattern value. */
 static const uint32_t dispatch_modes[4]={0,1,2,0xe2df6fd3u};

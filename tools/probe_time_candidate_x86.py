@@ -20,14 +20,19 @@ def main():
     if branch_report['address']!='0x5daa20' or branch_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected dispatcher report')
     memcpy_report=json.loads((base/'dependencies/memcpy_report.json').read_text())
     if [x['address'] for x in memcpy_report['items']]!=['0x481340','0x611640'] or memcpy_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected buffer copy report')
+    probe_report=json.loads((base/'dependencies/stack_probe_report.json').read_text())
+    if probe_report['address']!='0x648540' or probe_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected stack probe report')
     pe=pefile.PE(data=data,fast_load=True);page=pe.get_data(0x608000-pe.OPTIONAL_HEADER.ImageBase,0x1000)
     if len(page)!=0x1000:raise SystemExit('incomplete candidate page')
     cases=[]
     specs=[(0,1 if missing_virtual or null_virtual else 0,0,0,0)] if fault_case else [(tick,result,guard,alignment,mode) for tick in (0,1234,0xffffffd0,0xffffffff) for result,guard in ((0,0),(2,0),(1,1),(1,0)) for alignment in range(4) for mode in range(4)]
     for tick,result,guard,alignment,mode in specs:
         cpu=Uc(UC_ARCH_X86,UC_MODE_32);cpu.mem_map(0x400000,0x500000);cpu.mem_write(0x608000,page)
-        # Only three verified tiny dependency fragments are real; others are test doubles.
-        cpu.mem_write(0x648540,b'\x5a\x8d\xa4\x24\x54\xed\xff\xff\xff\xe2')
+        # Real dependencies are hash-checked against their lift reports; the rest are test doubles.
+        for region in probe_report['regions']:
+            address=int(region['address'],16);code=pe.get_data(address-pe.OPTIONAL_HEADER.ImageBase,region['length'])
+            if hashlib.sha256(code).hexdigest()!=region['bytes_sha256']:raise SystemExit('stack probe bytes differ')
+            cpu.mem_write(address,code)
         cpu.mem_write(0x605750,b'\xb8'+struct.pack('<I',result)+b'\xc2\x3c\x00')
         for address,expected in ((0x426ef0,bytes.fromhex('c3')),(0x608410,bytes.fromhex('c20400')),(0x481330,bytes.fromhex('8b442404a360c87100c3'))):
             actual=pe.get_data(address-pe.OPTIONAL_HEADER.ImageBase,len(expected))
@@ -94,6 +99,6 @@ def main():
                       'branch_calls':struct.unpack('<I',cpu.mem_read(0x8a0000,4))[0],
                       'copy_out_hex':bytes(cpu.mem_read(0x8a2000,0x500)).hex()})
     (base/'x86_short_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'candidate_source_sha256':report['source_sha256'],
-        'scope':'isolated candidate, nine actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
+        'scope':'isolated candidate, ten actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
     print(len(cases),'isolated x86 reference cases recorded')
 if __name__=='__main__':main()

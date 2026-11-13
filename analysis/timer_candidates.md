@@ -33,3 +33,5 @@ Ejecución en ARM64: el mismo arnés, con la candidata y sus seis dependencias t
 Séptima dependencia: el selector `0x5daa20` se tradujo y sustituye a su doble de prueba. Solo se alcanza con resultado 1 y sin guarda; en ese escenario se cubren sus dos llamadas y la ausencia de llamada. Coincidió en Windows x64 y en ARM64 en el S25. Quedan simuladas `0x481340`, `0x5daa50`, `0x605750`, `0x648540`, las funciones que llama el selector y las de la dependencia indirecta.
 
 Octava y novena dependencias: `0x481340` copia los búferes de `0x71a460` y `0x71a860` a los destinos de dos objetos globales (`+0x170`, tamaño en `+0x1b8`) mediante `0x611640`, una copia cdecl con `rep movsb`/`rep movsd`. Solo se alcanza con resultado 1 y sin guarda. Coincidió en Windows x64 y en ARM64. Quedan simuladas `0x5daa50`, `0x605750`, `0x648540`, las llamadas del selector y las de la dependencia indirecta.
+
+Décima dependencia: la sonda de pila `0x648540`/`0x648500` se tradujo y coincidió en Windows x64 y en ARM64. Quedan simuladas `0x5daa50` (x87 y tres llamadas), `0x605750` (construcción de cadenas con varias llamadas), las llamadas del selector y las de la dependencia indirecta.

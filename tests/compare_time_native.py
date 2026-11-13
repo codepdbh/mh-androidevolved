@@ -18,7 +18,7 @@ for i,(want,got) in enumerate(zip(reference['cases'],actual)):
     for reg in ('eax','ebx','ecx','edx','esi','edi','ebp','esp'):
         if want['registers'][reg]!=got['registers'][reg]:raise SystemExit(f'case {i}: {reg} differs')
     if (want['registers']['eflags']&0x8d5)!=(got['registers']['eflags']&0x8d5):raise SystemExit(f'case {i}: arithmetic flags differ')
-(base/('short_comparison_report.json' if platform=='windows-x64' else f'short_comparison_report_{platform}.json')).write_text(json.dumps({'cases':len(actual),'scope':'isolated candidate and nine translated dependencies, remaining dependencies synthetic; both exits',
+(base/('short_comparison_report.json' if platform=='windows-x64' else f'short_comparison_report_{platform}.json')).write_text(json.dumps({'cases':len(actual),'scope':'isolated candidate and ten translated dependencies, remaining dependencies synthetic; both exits',
     'compared':['general registers','six arithmetic flags','observed stack','object prefix','copied buffer','global and timer state'],
     'platform':platform,'limitations':['no real APIs','not exhaustive','not whole game']+([] if platform.startswith('android') else ['not Android'])},indent=2)+'\n',encoding='utf-8')
 print(len(actual),'synthetic cases match in observed state')

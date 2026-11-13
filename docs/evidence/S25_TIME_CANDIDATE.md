@@ -32,3 +32,11 @@ Se tradujeron `0x481340` y su rutina de copia `0x611640` (`tools/lift_time_memcp
 
 - SHA-256 del binario ARM64: `3240db25e5ad249d2aab024af14de002c9bece3b1d1c59a1bcfa3aba8a1f70b0`.
 - Resultado en el S25 `SM-S938B`: 256 + 12 casos coinciden con Unicorn; fallos 70 / 74 / 75 / 71; limpieza confirmada. Windows x64 también coincidió.
+
+## Cuarta ejecución: sonda de pila
+
+Se tradujo `0x648540`, que redondea `eax` a múltiplo de cuatro y continúa en `0x648500`: toca cada página de 4 KiB, baja `esp`, restaura `edx` y vuelve con `eax` igual al nuevo `esp`. El relleno `lea eax,[eax]` de `0x64851c` es inalcanzable y no se traduce. Antes se usaba un doble que perdía `edx` y no dejaba en la pila las palabras que escribe el original.
+
+- SHA-256 del binario ARM64: `f55e6a33e101df70601cebb845d34cc00cdb4dd6133029c29867f2b8ee0f830e`.
+- Resultado en el S25 `SM-S938B`: 256 + 12 casos coinciden con Unicorn; fallos 70 / 74 / 75 / 71; limpieza confirmada. Windows x64 también coincidió.
+- Límite: las páginas de guarda de Windows no se modelan; los toques de página son accesos comprobados normales.
