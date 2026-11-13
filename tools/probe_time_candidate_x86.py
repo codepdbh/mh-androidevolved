@@ -15,6 +15,8 @@ def main():
     if hashlib.sha256(data).hexdigest()!=EXPECTED:raise SystemExit('unexpected input hash')
     base=ROOT/'private/analysis/candidate_time';report=json.loads((base/'report.json').read_text())
     if report['address']!='0x6081a0':raise SystemExit('unexpected candidate')
+    branch_report=json.loads((base/'dependencies/branch_report.json').read_text())
+    if branch_report['address']!='0x5daa20' or branch_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected dispatcher report')
     pe=pefile.PE(data=data,fast_load=True);page=pe.get_data(0x608000-pe.OPTIONAL_HEADER.ImageBase,0x1000)
     if len(page)!=0x1000:raise SystemExit('incomplete candidate page')
     cases=[]
@@ -38,7 +40,13 @@ def main():
         setter=pe.get_data(0x604f30-pe.OPTIONAL_HEADER.ImageBase,10)
         if setter!=bytes.fromhex('8b442404894108c20400'):raise SystemExit('setter bytes differ')
         cpu.mem_write(0x604f30,setter)
-        for address in (0x481340,0x5daa20,0x5daa50):cpu.mem_write(address,b'\xc3')
+        for address in (0x481340,0x5daa50):cpu.mem_write(address,b'\xc3')
+        # Real mode dispatcher 0x5daa20, checked against the lift report; its two callees are counters.
+        dispatcher=pe.get_data(0x5daa20-pe.OPTIONAL_HEADER.ImageBase,0x21)
+        if hashlib.sha256(dispatcher).hexdigest()!=branch_report['bytes_sha256']:raise SystemExit('dispatcher bytes differ')
+        cpu.mem_write(0x5daa20,dispatcher)
+        cpu.mem_write(0x476a80,b'\x83\x05\x00\x00\x8a\x00\x01\xc3')              # add dword [0x8a0000],1; ret
+        cpu.mem_write(0x476aa0,b'\x81\x05\x00\x00\x8a\x00\x00\x01\x00\x00\xc3')  # add dword [0x8a0000],0x100; ret
         cpu.mem_write(0x800100,b'\xa1\x00\x00\x81\x00\x8d\x50\x28\x89\x15\x00\x00\x81\x00\xc3')
         cpu.mem_write(0x81b4fc,struct.pack('<I',0 if missing_timer else 0x800100));cpu.mem_write(0x810000,struct.pack('<I',tick))
         cpu.mem_write(0x736db8,struct.pack('<I',0 if null_virtual else 0x820000));cpu.mem_write(0x82000c,struct.pack('<I',0x821000))
@@ -47,6 +55,7 @@ def main():
         cpu.mem_write(0x880000+alignment,struct.pack('<I',0x8f0000));cpu.mem_write(0x8711a8,struct.pack('<I',0));cpu.mem_write(0x8711c4,struct.pack('<I',guard))
         cpu.mem_write(0x7e6ba0,bytes((i*7+3)&255 for i in range(0x400)))
         cpu.mem_write(0x7d6af0,bytes((i*5+11)&255 for i in range(0x60)))
+        cpu.mem_write(0x7d6b18,struct.pack('<I',(0,1,2,0xe2df6fd3)[alignment]));cpu.mem_write(0x8a0000,struct.pack('<I',0))
         for name,value in [('eax',0x11111111),('ebx',0x22222222),('ecx',0 if null_object else 0x870000),('edx',0x33333333),
                            ('esi',0x44444444),('edi',0x55555555),('ebp',0x66666666),('esp',0x880000+alignment),('eflags',2)]:cpu.reg_write(REGS[name],value)
         faults=[]
@@ -68,8 +77,9 @@ def main():
                       'inner_dep_value':struct.unpack('<I',cpu.mem_read(0x7d7bdc,4))[0],
                       'global_a_after':struct.unpack('<I',cpu.mem_read(0x725a54,4))[0],'global_b_after':struct.unpack('<I',cpu.mem_read(0x725a4c,4))[0],
                       'structure_hex':bytes(cpu.mem_read(0x7d6ae4,0x10ec)).hex(),
-                      'tick_after':struct.unpack('<I',cpu.mem_read(0x810000,4))[0]})
+                      'tick_after':struct.unpack('<I',cpu.mem_read(0x810000,4))[0],
+                      'branch_calls':struct.unpack('<I',cpu.mem_read(0x8a0000,4))[0]})
     (base/'x86_short_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'candidate_source_sha256':report['source_sha256'],
-        'scope':'isolated candidate, six actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
+        'scope':'isolated candidate, seven actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
     print(len(cases),'isolated x86 reference cases recorded')
 if __name__=='__main__':main()

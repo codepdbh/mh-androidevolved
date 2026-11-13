@@ -1,5 +1,7 @@
 # Estado técnico
 
+Avance posterior: se tradujo una séptima dependencia de la candidata de tiempo, el selector de modo `0x5daa20` (9 instrucciones, dos llamadas directas con retorno exacto). El arnés ahora varía el global que la controla y registra qué función llamada se ejecuta; ambas ramas y la ausencia de llamada quedan cubiertas. Coincidieron los 256 casos con Unicorn en Windows x64 y en ARM64 en el S25, más los 12 de argumento cero y los cuatro fallos; limpieza confirmada. Las funciones `0x476a80` y `0x476aa0` siguen siendo sustitutos. Ver `docs/evidence/S25_TIME_CANDIDATE.md`.
+
 Avance posterior: la candidata de tiempo con sus seis dependencias traducidas se ejecutó por primera vez en ARM64, en el S25, dentro de un arnés aislado. Coincidieron con la referencia x86 de Unicorn los 256 casos principales y los 12 de la rama de argumento cero, y los cuatro fallos controlados devolvieron los códigos esperados; se confirmó la limpieza. Las demás dependencias siguen simuladas y el código no está integrado en la APK; el juego sigue sin arrancar. Ver `docs/evidence/S25_TIME_CANDIDATE.md`.
 
 Avance posterior: una prueba aislada de la rama de argumento cero de la dependencia indirecta coincidió en 12 casos adicionales frente a Unicorn, con dos métodos virtuales simulados. El objeto ARM64 combinado sigue sin ejecutarse en Android y las implementaciones virtuales reales están pendientes.

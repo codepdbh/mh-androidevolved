@@ -279,6 +279,16 @@ def lift_time_inner_dependency():
     if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('structure setter lift failed')
     return result
 
+def lift_time_branch_dependency():
+    """Lift the fixed nine-instruction mode dispatcher 0x5daa20 as private C."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_branch_dependency.py')],45,'time-branch-lift',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('mode dispatcher lift failed')
+    return result
+
 def lift_time_indirect_dependency():
     """Lift one bounded indirect-call candidate without executing it."""
     import sys
@@ -351,6 +361,9 @@ def _check_time_harness_sources(base):
     indirect_report=json.loads((base/'dependencies/indirect_precise_report.json').read_text())
     indirect_source=(base/'dependencies/dep_00604dc0_precise.c').read_text(encoding='utf-8').removesuffix('\n')
     if hashlib.sha256(indirect_source.encode()).hexdigest()!=indirect_report['adapted_sha256']:raise WorkSafeError('indirect source hash mismatch')
+    branch_report=json.loads((base/'dependencies/branch_report.json').read_text())
+    branch_source=(base/'dependencies/dep_005daa20_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if branch_report['address']!='0x5daa20' or hashlib.sha256(branch_source.encode()).hexdigest()!=branch_report['adapted_sha256']:raise WorkSafeError('dispatcher source hash mismatch')
 
 def compare_time_candidate_native():
     """Compile an isolated private C candidate with test doubles and compare it."""
@@ -358,7 +371,7 @@ def compare_time_candidate_native():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise()
+    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency()
     vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231'
     kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits/10';version='10.0.26100.0'
     cl=vs/'bin/Hostx64/x64/cl.exe';inc=[vs/'include',kits/'Include'/version/'ucrt',kits/'Include'/version/'shared',kits/'Include'/version/'um']
@@ -412,7 +425,7 @@ def build_time_candidate_arm64_test():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise()
+    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency()
     base,out=_time_arm64_paths();_check_time_harness_sources(base)
     ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')

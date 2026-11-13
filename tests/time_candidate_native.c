@@ -20,7 +20,13 @@ void sub_00481330(void){if(MEM32(g_esp)!=0x6082a5)exit(83);g_esp+=4;}
 void sub_00608410(void){if(MEM32(g_esp)!=0x608261)exit(83);g_esp+=8;}
 #endif
 void sub_00481340(void){if(MEM32(g_esp)!=0x6082ad)exit(83);g_esp+=4;}
+#ifdef MH_REAL_SMALL_DEPS
+/* Callees of the translated dispatcher 0x5daa20: counters only, no game behaviour. */
+void sub_00476A80(void){if(MEM32(g_esp)!=0x5daa2e)exit(87);MEM32(0x8a0000)+=1;g_esp+=4;}
+void sub_00476AA0(void){if(MEM32(g_esp)!=0x5daa3e)exit(87);MEM32(0x8a0000)+=0x100;g_esp+=4;}
+#else
 void sub_005DAA20(void){if(MEM32(g_esp)!=0x6083a9)exit(83);g_esp+=4;}
+#endif
 void sub_005DAA50(void){if(MEM32(g_esp)!=0x6083ae)exit(83);g_esp+=4;}
 void sub_00401030(void){uint32_t ret=MEM32(g_esp);if(ret!=0x604df0 && ret!=0x604e0f)exit(85);g_esp+=4;}
 void sub_004932F0(void){if(MEM32(g_esp)!=0x604e24)exit(85);g_esp+=4;}
@@ -40,7 +46,10 @@ void sub_00604DC0(void);void sub_00604F30(void);
 #include "dependencies/dep_00604f30.c"
 void sub_00401030(void);void sub_004932F0(void);void sub_00493230(void);
 #include "dependencies/dep_00604dc0_precise.c"
+#include "dependencies/dep_005daa20_precise.c"
 #endif
+/* Mode selector for 0x5daa20 per alignment: first call, second call, neither, pattern value. */
+static const uint32_t dispatch_modes[4]={0,1,2,0xe2df6fd3u};
 static void hex_bytes(const uint8_t *p,unsigned n){for(unsigned i=0;i<n;i++)printf("%02x",p[i]);}
 static int run_virtual_zero(void){
     const uint32_t args[]={0,0x12345678u,0xffffffffu};
@@ -73,6 +82,7 @@ int main(int argc,char **argv){
         memset(guest+0x71a460,0,0x400);memset(guest+0x7d6ae4,0,0x10ec);MEM32(0x7d7bdc)=0;MEM32(0x7e8fa0)=0;MEM32(0x71c860)=0;
         for(unsigned i=0;i<0x400;i++)guest[0x7e6ba0+i]=(uint8_t)(i*7+3);
         for(unsigned i=0;i<0x60;i++)guest[0x7d6af0+i]=(uint8_t)(i*5+11);
+        MEM32(0x7d6b18)=dispatch_modes[alignment];MEM32(0x8a0000)=0;
         g_mem_base=0;g_eax=0x11111111;g_ebx=0x22222222;g_ecx=null_object?0:0x870000;g_edx=0x33333333;
         g_esi=0x44444444;g_edi=0x55555555;g_ebp=0x66666666;g_esp=0x880000+alignment;
         g_flag_k=g_flag_a=g_flag_b=g_flag_cf=0;
@@ -84,7 +94,7 @@ int main(int argc,char **argv){
         hex_bytes(guest+0x87ed00,0x1308);printf("\",\"object_hex\":\"");hex_bytes(guest+0x870000,16);
         printf("\",\"copy_hex\":\"");hex_bytes(guest+0x71a460,0x400);
         printf("\",\"structure_hex\":\"");hex_bytes(guest+0x7d6ae4,0x10ec);
-        printf("\",\"global_value\":%u,\"small_dep_value\":%u,\"inner_dep_value\":%u,\"global_a_after\":%u,\"global_b_after\":%u,\"tick_after\":%u}\n",MEM32(0x7e8fa0),MEM32(0x71c860),MEM32(0x7d7bdc),MEM32(0x725a54),MEM32(0x725a4c),MEM32(0x810000));
+        printf("\",\"global_value\":%u,\"small_dep_value\":%u,\"inner_dep_value\":%u,\"global_a_after\":%u,\"global_b_after\":%u,\"tick_after\":%u,\"branch_calls\":%u}\n",MEM32(0x7e8fa0),MEM32(0x71c860),MEM32(0x7d7bdc),MEM32(0x725a54),MEM32(0x725a4c),MEM32(0x810000),MEM32(0x8a0000));
     }
     return 0;
 }
