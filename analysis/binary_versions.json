@@ -1,0 +1,56 @@
+[
+  {
+    "path": "binkw32.dll",
+    "sha256": "ddd2c828cd81118d188733de8858ef7d858c583603ffcf934422572da2b6ce99",
+    "version_strings": [
+      {
+        "CompanyName": "RAD Game Tools, Inc.",
+        "FileDescription": "RAD Video Tools",
+        "FileVersion": "1.6c",
+        "LegalCopyright": "Copyright (C) 1994-2004, RAD Game Tools, Inc.",
+        "LegalTrademarks": "Bink and Smacker are trademarks of RAD Game Tools, Inc.",
+        "ProductName": "Bink and Smacker",
+        "ProductVersion": "1.6c",
+        "Comments": "Thank you for using Bink and Smacker!"
+      }
+    ]
+  },
+  {
+    "path": "dinput8.dll",
+    "sha256": "4cd7adfa4898d80cc6e4f4645066d8157e9bad1bf18950f6f4798abdce20bf56",
+    "version_strings": [
+      {
+        "CompanyName": "ThirteenAG",
+        "FileDescription": "Ultimate ASI Loader",
+        "FileVersion": "1.0.0.0",
+        "InternalName": "Ultimate-ASI-Loader-x86",
+        "LegalCopyright": "MIT License",
+        "OriginalFilename": "Ultimate-ASI-Loader-x86.dll",
+        "ProductName": "Ultimate-ASI-Loader-x86",
+        "ProductVersion": "1.0.0.0",
+        "UpdateUrl": "https://github.com/ThirteenAG/Ultimate-ASI-Loader"
+      }
+    ]
+  },
+  {
+    "path": "manhunt.exe",
+    "sha256": "5001b64f77690316330575fcfe6acd5c5115c5476c183ffec0d86779b0686b52",
+    "version_strings": []
+  },
+  {
+    "path": "mss32.dll",
+    "sha256": "06f26eaa14f78e819e104e5c3af610dc11cbe45a69a40fb6c9750db15ec4d615",
+    "version_strings": [
+      {
+        "CompanyName": "RAD Game Tools, Inc.",
+        "FileDescription": "Miles Sound System",
+        "FileVersion": "6.5h",
+        "LegalCopyright": "Copyright (C) 1991-2003, RAD Game Tools, Inc.",
+        "LegalTrademarks": "Miles Sound System is a trademark of RAD Game Tools, Inc.",
+        "ProductName": "Miles Sound System",
+        "ProductVersion": "6.5h",
+        "Comments": "Thank you for using Miles!"
+      }
+    ]
+  }
+]

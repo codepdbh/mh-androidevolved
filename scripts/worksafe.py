@@ -1,0 +1,1463 @@
+"""Headless Windows process supervisor. Only explicitly approved command lines are safe.
+
+Job restrictions do not sandbox a program or stop a GUI from changing display state.
+Callers must never launch untrusted/GUI/game programs. No interactive mode exists.
+"""
+from __future__ import annotations
+import ctypes as c
+from ctypes import wintypes as w
+import json, os, subprocess, uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+class WorkSafeError(RuntimeError): pass
+
+def available_memory_mb():
+    if os.name != 'nt': raise WorkSafeError('Windows required')
+    class MEMORYSTATUS(c.Structure):
+        _fields_ = [('length',w.DWORD),('load',w.DWORD),('total_phys',c.c_ulonglong),('avail_phys',c.c_ulonglong),('total_page',c.c_ulonglong),('avail_page',c.c_ulonglong),('total_virtual',c.c_ulonglong),('avail_virtual',c.c_ulonglong),('avail_extended',c.c_ulonglong)]
+    status=MEMORYSTATUS(); status.length=c.sizeof(status)
+    if not c.windll.kernel32.GlobalMemoryStatusEx(c.byref(status)): raise c.WinError(c.get_last_error())
+    return status.avail_phys // (1024*1024)
+
+def build_android():
+    """One fixed offline build. Refuse to start under memory pressure."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    free=available_memory_mb()
+    if free < int(cfg['build_min_free_memory_mb']):
+        raise WorkSafeError(f'insufficient available RAM: {free} MiB; minimum {cfg["build_min_free_memory_mb"]} MiB')
+    java=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Android'/'Android Studio'/'jbr'/'bin'/'java.exe'
+    dist=Path.home()/'.gradle'/'wrapper'/'dists'/'gradle-8.11.1-bin'
+    jars=list(dist.glob('*/gradle-8.11.1/lib/gradle-launcher-8.11.1.jar'))
+    if not java.is_file() or len(jars)!=1: raise WorkSafeError('expected local JDK 21 and one Gradle 8.11.1 distribution')
+    argv=[str(java),'-Xmx256m','-Djava.awt.headless=true','-cp',str(jars[0]),'org.gradle.launcher.GradleMain', '--offline','--no-daemon','--max-workers=1','--console=plain','-p',str(ROOT/'android'),'assembleDebug']
+    return _run_job(argv,int(cfg['build_timeout_seconds']),'android-build',cfg,max_processes=int(cfg['build_max_processes']),memory_mb=int(cfg['build_job_memory_mb']))
+
+def check_android_java():
+    """Compile only the launcher against the installed Android API, without Gradle."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    free=available_memory_mb()
+    if free < 1024: raise WorkSafeError(f'insufficient available RAM: {free} MiB')
+    javac=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Android'/'Android Studio'/'jbr'/'bin'/'javac.exe'
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platforms'/'android-35'/'android.jar'
+    source=ROOT/'android/app/src/main/java/com/manhuntae/android/MainActivity.java'
+    if not javac.is_file() or not sdk.is_file() or not source.is_file(): raise WorkSafeError('JDK, Android 35 SDK or launcher source missing')
+    output=ROOT/'build'/'android-java-check'; output.mkdir(parents=True,exist_ok=True)
+    argv=[str(javac),'-J-Xmx128m','-J-Djava.awt.headless=true','-proc:none','-source','11','-target','11','-classpath',str(sdk),'-d',str(output),str(source)]
+    return _run_job(argv,60,'android-java-check',cfg,max_processes=1,memory_mb=384)
+
+def check_android_guest_memory():
+    """Compile the guest-memory translation unit for Android ARM64, without linking."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    free=available_memory_mb()
+    if free < 1024: raise WorkSafeError(f'insufficient available RAM: {free} MiB')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe'; source=ROOT/'runtime'/'guest_memory.c'
+    if not clang.is_file() or not source.is_file(): raise WorkSafeError('NDK 28.2 clang or guest memory source missing')
+    output=ROOT/'build'/'android-native-check'; output.mkdir(parents=True,exist_ok=True)
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-Wall','-Wextra','-Werror','-c',str(source),'-o',str(output/'guest_memory.o')]
+    return _run_job(argv,60,'android-native-check',cfg,max_processes=1,memory_mb=384)
+
+def build_android_native_diagnostics():
+    """Build only the diagnostic JNI library with the installed NDK."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536: raise WorkSafeError('insufficient available RAM for native link')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file(): raise WorkSafeError('NDK clang missing')
+    output=ROOT/'build'/'android-native-check';output.mkdir(parents=True,exist_ok=True)
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-fPIC','-shared','-Wall','-Wextra','-Werror','-Wl,--no-undefined','-I',str(ROOT/'runtime'),str(ROOT/'android/app/src/main/cpp/native_diagnostics.c'),str(ROOT/'runtime/guest_memory.c'),str(ROOT/'runtime/pe32_image.c'),str(ROOT/'runtime/pe32_imports.c'),str(ROOT/'runtime/pe32_import_plan.c'),'-o',str(output/'libmh_runtime.so')]
+    built=_run_job(argv,60,'android-jni-build',cfg,max_processes=4,memory_mb=512)
+    if built['returncode']!=0 or built['timed_out']: return {'build':built,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_android_native.py')],30,'android-jni-verify',cfg,max_processes=1,memory_mb=256)
+    return {'build':built,'verify':verified}
+
+def check_android_cmake():
+    """Configure and build the app's native CMake target with one worker."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536: raise WorkSafeError('insufficient available RAM for CMake')
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'
+    ndk=sdk/'ndk'/'28.2.13676358'
+    cmake=sdk/'cmake'/'3.22.1'/'bin'/'cmake.exe';ninja=sdk/'cmake'/'3.22.1'/'bin'/'ninja.exe'
+    toolchain=ndk/'build'/'cmake'/'android.toolchain.cmake';output=ROOT/'build'/'android-cmake-check'
+    if not all(p.is_file() for p in (cmake,ninja,toolchain)): raise WorkSafeError('CMake, Ninja or NDK toolchain missing')
+    argv=[str(cmake),'-S',str(ROOT/'android/app/src/main/cpp'),'-B',str(output),'-G','Ninja',
+          '-DCMAKE_MAKE_PROGRAM='+str(ninja),'-DCMAKE_TOOLCHAIN_FILE='+str(toolchain),
+          '-DANDROID_ABI=arm64-v8a','-DANDROID_PLATFORM=android-29','-DCMAKE_BUILD_TYPE=Debug']
+    configured=_run_job(argv,60,'android-cmake-configure',cfg,max_processes=8,memory_mb=512)
+    if configured['returncode']!=0 or configured['timed_out']:return {'configure':configured,'build':None,'verify':None}
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient RAM for CMake build')
+    built=_run_job([str(cmake),'--build',str(output),'--parallel','1'],60,'android-cmake-build',cfg,max_processes=8,memory_mb=512)
+    if built['returncode']!=0 or built['timed_out']:return {'configure':configured,'build':built,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_android_native.py'),'--cmake'],30,'android-cmake-verify',cfg,max_processes=1,memory_mb=256)
+    return {'configure':configured,'build':built,'verify':verified}
+
+def test_jni_diagnostics_host():
+    """Exercise JNI C entry points with a fake JNI table, using the PE as read-only data."""
+    import hashlib
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    game=ROOT/'Manhunt Collection'/'Manhunt'/'manhunt.exe'
+    expected='5001b64f77690316330575fcfe6acd5c5115c5476c183ffec0d86779b0686b52'
+    def sha():
+        with game.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+    if sha()!=expected:raise WorkSafeError('unexpected executable hash')
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk';ndk=sdk/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    jni=ndk/'sysroot'/'usr'/'include'/'jni.h'
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio'/'18'/'Community'/'VC'/'Tools'/'MSVC'/'14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits'/'10';sdkver='10.0.26100.0';link=vs/'bin'/'Hostx64'/'x64'/'link.exe';cl=link.parent/'cl.exe'
+    include=[vs/'include',kits/'Include'/sdkver/'ucrt',kits/'Include'/sdkver/'shared',kits/'Include'/sdkver/'um'];lib=[vs/'lib'/'x64',kits/'Lib'/sdkver/'ucrt'/'x64',kits/'Lib'/sdkver/'um'/'x64']
+    if not all(p.is_file() for p in (cl,jni,link)) or not all(p.is_dir() for p in include+lib):raise WorkSafeError('host compiler, JNI header or SDK missing')
+    out=ROOT/'build'/'jni-host-check';out.mkdir(parents=True,exist_ok=True)
+    header=jni.read_text(encoding='utf-8');marker='#define JNIEXPORT  __attribute__ ((visibility ("default")))'
+    if header.count(marker)!=1:raise WorkSafeError('unexpected JNI header visibility declaration')
+    # Host-only test executable: visibility is irrelevant; signatures remain unchanged.
+    (out/'jni.h').write_text(header.replace(marker,'#define JNIEXPORT'),encoding='utf-8')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,include));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(link.parent)+os.pathsep+env.get('PATH','')
+    exe=out/'jni-test.exe';argv=[str(cl),'/nologo','/Od','/std:c11','/utf-8','/I',str(out),'/I',str(ROOT/'runtime'),'/Fo'+str(out/'jni-test.obj'),'/Fe'+str(exe),str(ROOT/'tests'/'test_jni_diagnostics.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'jni-host-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'test':None}
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient RAM for JNI host test')
+    tested=_run_job([str(exe),str(game)],30,'jni-host-test',cfg,max_processes=1,memory_mb=256)
+    if sha()!=expected:raise WorkSafeError('original executable hash changed during read-only test')
+    return {'build':built,'test':tested}
+
+def test_guest_memory_wasm():
+    """Compile and run only the project's freestanding guest-memory test."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    free=available_memory_mb()
+    if free < 1024: raise WorkSafeError(f'insufficient available RAM: {free} MiB')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe'
+    node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
+    if not clang.is_file() or not node.is_file(): raise WorkSafeError('NDK clang or Node missing')
+    output=ROOT/'build'/'wasm-test'; output.mkdir(parents=True,exist_ok=True)
+    argv=[str(clang),'--target=wasm32-unknown-unknown','-ffreestanding','-fno-builtin','-nostdlib','-std=c11','-Wall','-Wextra','-Werror','-DMH_NO_MAIN','-I',str(ROOT/'tests'/'wasm_include'),'-I',str(ROOT/'runtime'),str(ROOT/'runtime'/'guest_memory.c'),str(ROOT/'tests'/'test_guest_memory.c'),str(ROOT/'tests'/'wasm_memmove.c'),'-Wl,--no-entry','-Wl,--export=mh_memory_tests','-o',str(output/'guest_memory.wasm')]
+    compiled=_run_job(argv,60,'guest-memory-wasm-build',cfg,max_processes=2,memory_mb=384)
+    if compiled['returncode'] != 0 or compiled['timed_out']: return {'compile':compiled,'test':None}
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient memory to run WebAssembly test')
+    tested=_run_job([str(node),str(ROOT/'tests'/'run_guest_memory_wasm.js')],30,'guest-memory-wasm-test',cfg,max_processes=1,memory_mb=256)
+    return {'compile':compiled,'test':tested}
+
+def test_pe_image_wasm():
+    """Compile and run synthetic PE32 loader tests without a game executable."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe';node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
+    if not clang.is_file() or not node.is_file():raise WorkSafeError('NDK clang or Node missing')
+    output=ROOT/'build'/'wasm-test';output.mkdir(parents=True,exist_ok=True)
+    argv=[str(clang),'--target=wasm32-unknown-unknown','-ffreestanding','-fno-builtin','-nostdlib','-std=c11','-Wall','-Wextra','-Werror','-DMH_NO_MAIN','-DMH_TEST_IMPORT_REGISTRY','-I',str(ROOT/'tests'/'wasm_include'),'-I',str(ROOT/'runtime'),str(ROOT/'runtime'/'guest_memory.c'),str(ROOT/'runtime'/'pe32_image.c'),str(ROOT/'runtime'/'pe32_imports.c'),str(ROOT/'runtime'/'pe32_import_plan.c'),str(ROOT/'runtime'/'import_registry.c'),str(ROOT/'tests'/'test_pe_image.c'),str(ROOT/'tests'/'wasm_memmove.c'),'-Wl,--no-entry','-Wl,--export=mh_pe_tests','-o',str(output/'pe_image.wasm')]
+    built=_run_job(argv,60,'pe-image-wasm-build',cfg,max_processes=2,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'test':None}
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM for PE test')
+    tested=_run_job([str(node),str(ROOT/'tests'/'run_pe_wasm.js')],30,'pe-image-wasm-test',cfg,max_processes=1,memory_mb=256)
+    return {'build':built,'test':tested}
+
+def test_local_pe_mapping():
+    """Map the known executable as data in a bounded WASM test; never execute it."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM for local PE mapping')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe';node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
+    if not clang.is_file() or not node.is_file():raise WorkSafeError('NDK clang or Node missing')
+    output=ROOT/'build'/'wasm-test';output.mkdir(parents=True,exist_ok=True)
+    argv=[str(clang),'--target=wasm32-unknown-unknown','-ffreestanding','-fno-builtin','-nostdlib','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'tests'/'wasm_include'),'-I',str(ROOT/'runtime'),str(ROOT/'runtime'/'guest_memory.c'),str(ROOT/'runtime'/'pe32_image.c'),str(ROOT/'runtime'/'pe32_imports.c'),str(ROOT/'runtime'/'pe32_import_plan.c'),str(ROOT/'tests'/'pe_real_wasm.c'),str(ROOT/'tests'/'wasm_memmove.c'),'-Wl,--no-entry','-Wl,--export=pe_source','-Wl,--export=pe_image','-Wl,--export=pe_capacity','-Wl,--export=pe_size','-Wl,--export=pe_entry','-Wl,--export=pe_map','-Wl,--export=pe_collect_imports','-Wl,--export=pe_import','-Wl,--export=pe_plan_missing','-Wl,--export-memory','-o',str(output/'pe_real.wasm')]
+    built=_run_job(argv,60,'pe-real-wasm-build',cfg,max_processes=2,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'test':None}
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient RAM for local PE mapping')
+    tested=_run_job([str(node),str(ROOT/'tests'/'run_pe_real_wasm.js')],30,'pe-real-wasm-test',cfg,max_processes=1,memory_mb=256)
+    return {'build':built,'test':tested}
+
+def inspect_game_entrypoint():
+    """Run the fixed bounded static analysis script; never execute the PE."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient available RAM for static analysis')
+    script=ROOT/'tools'/'inspect_entrypoint.py'
+    if not script.is_file(): raise WorkSafeError('entrypoint inspector missing')
+    return _run_job([sys.executable,str(script)],30,'pcrecomp-entrypoint',cfg,max_processes=1,memory_mb=384)
+
+def map_import_references():
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    return _run_job([sys.executable,str(ROOT/'tools'/'map_import_references.py')],30,'import-references',cfg,max_processes=1,memory_mb=384)
+
+def inspect_tick_candidate():
+    """Analyze fixed GetTickCount byte windows without executing the game."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/inspect_tick_candidate.py')],30,'tick-candidate-inspection',cfg,max_processes=1,memory_mb=384)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('static tick inspection failed; inspect logs')
+    return result
+
+def inspect_timegettime_candidates():
+    """Analyze fixed multimedia timer call windows as read-only PE data."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/inspect_timegettime_candidates.py')],30,'timegettime-candidate-inspection',cfg,max_processes=1,memory_mb=384)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('static multimedia timer inspection failed')
+    return result
+
+def lift_time_candidate():
+    """Lift one fixed bounded timer-related candidate; output remains private."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_candidate.py')],45,'time-candidate-lift',cfg,max_processes=1,memory_mb=384)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('timer candidate lift failed; inspect logs')
+    return result
+
+def probe_time_candidate_x86(mode='normal'):
+    """Run one bounded isolated x86 routine with synthetic dependency stubs."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if mode not in ('normal','null-object','missing-timer','missing-virtual','null-virtual-object'):raise WorkSafeError('unknown timer reference mode')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    args=[] if mode=='normal' else ['--'+mode]
+    result=_run_job([sys.executable,str(ROOT/'tools/probe_time_candidate_x86.py'),*args],45,'time-x86-reference-'+mode,cfg,max_processes=1,memory_mb=512)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('isolated time reference failed; inspect logs')
+    return result
+
+def inspect_time_dependencies():
+    """Inspect fixed direct-dependency windows without executing the PE."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/inspect_time_dependencies.py')],30,'time-dependencies-inspect',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('time dependency inspection failed')
+    return result
+
+def lift_time_dependencies():
+    """Lift only three fixed, statically checked tiny dependencies."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_dependencies.py')],45,'time-dependencies-lift',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('time dependency lift failed; inspect logs')
+    return result
+
+def lift_time_copy_dependency():
+    """Lift one fixed bounded structure-copy candidate without running it."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_copy_dependency.py')],45,'time-copy-lift',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('copy candidate lift failed; inspect logs')
+    return result
+
+def lift_time_inner_dependency():
+    """Lift the fixed three-instruction structure setter as private C."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_inner_dependency.py')],30,'time-inner-lift',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('structure setter lift failed')
+    return result
+
+def lift_time_indirect_dependency():
+    """Lift one bounded indirect-call candidate without executing it."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_indirect_dependency.py')],45,'time-indirect-lift',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('indirect candidate lift failed')
+    return result
+
+def prepare_time_indirect_precise():
+    """Validate six calls and prepare a checked private indirect candidate."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/prepare_time_indirect_precise.py')],30,'time-indirect-precise',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('indirect call preparation failed; inspect logs')
+    return result
+
+def compile_checked_time_indirect():
+    """Compile one adapted indirect dependency with checked memory and calls."""
+    import hashlib,re,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    prepared=prepare_time_indirect_precise();folder=ROOT/'private/analysis/candidate_time/dependencies'
+    report=json.loads((folder/'indirect_precise_report.json').read_text())
+    source=(folder/'dep_00604dc0_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if hashlib.sha256(source.encode()).hexdigest()!=report['adapted_sha256']:raise WorkSafeError('indirect source hash mismatch')
+    operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',source))
+    if not operations.issubset({'MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported indirect operations: '+str(sorted(operations)))
+    unit=folder/'indirect_checked_unit.c'
+    unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_00401030(void);\nvoid sub_004932F0(void);\nvoid sub_00493230(void);\n'+source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(folder/'indirect-checked-arm64.o')]
+    built=_run_job(argv,60,'time-indirect-checked-build',cfg,max_processes=1,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('checked indirect compilation failed')
+    verification=_run_job([sys.executable,str(ROOT/'tools/verify_graphics_object.py'),'--time-indirect'],30,'time-indirect-object-verify',cfg,max_processes=1,memory_mb=256)
+    if verification['returncode']!=0 or verification['timed_out']:raise WorkSafeError('indirect object verification failed')
+    return {'prepare':prepared,'build':built,'verification':verification}
+
+def prepare_time_copy_precise():
+    """Validate and adapt exactly two calls in the private copy dependency."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/prepare_time_copy_precise.py')],30,'time-copy-precise',cfg,max_processes=1,memory_mb=384)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('copy call preparation failed')
+    return result
+
+def compare_time_candidate_native():
+    """Compile an isolated private C candidate with test doubles and compare it."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise()
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits/10';version='10.0.26100.0'
+    cl=vs/'bin/Hostx64/x64/cl.exe';inc=[vs/'include',kits/'Include'/version/'ucrt',kits/'Include'/version/'shared',kits/'Include'/version/'um']
+    lib=[vs/'lib/x64',kits/'Lib'/version/'ucrt/x64',kits/'Lib'/version/'um/x64']
+    if not cl.is_file() or not all(x.is_dir() for x in inc+lib):raise WorkSafeError('host compiler or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,inc));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    base=ROOT/'private/analysis/candidate_time';exe=base/'short-test.exe'
+    dep_report=json.loads((base/'dependencies/report.json').read_text())
+    import hashlib
+    if {x['address'] for x in dep_report['items']}!={'0x426ef0','0x481330','0x608410'}:raise WorkSafeError('unexpected dependency set')
+    for item in dep_report['items']:
+        name=item['source']
+        if name not in ('dep_00426ef0.c','dep_00481330.c','dep_00608410.c'):raise WorkSafeError('unexpected dependency filename')
+        content=(base/'dependencies'/name).read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(content.encode()).hexdigest()!=item['sha256']:raise WorkSafeError('dependency source hash mismatch')
+    copy_report=json.loads((base/'dependencies/copy_precise_report.json').read_text())
+    copy_source=(base/'dependencies/dep_00604d20_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if hashlib.sha256(copy_source.encode()).hexdigest()!=copy_report['adapted_sha256']:raise WorkSafeError('copy source hash mismatch')
+    inner_report=json.loads((base/'dependencies/inner_report.json').read_text())
+    inner_source=(base/'dependencies/dep_00604f30.c').read_text(encoding='utf-8').removesuffix('\n')
+    if inner_report['address']!='0x604f30' or hashlib.sha256(inner_source.encode()).hexdigest()!=inner_report['source_sha256']:raise WorkSafeError('inner setter source hash mismatch')
+    indirect_report=json.loads((base/'dependencies/indirect_precise_report.json').read_text())
+    indirect_source=(base/'dependencies/dep_00604dc0_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if hashlib.sha256(indirect_source.encode()).hexdigest()!=indirect_report['adapted_sha256']:raise WorkSafeError('indirect source hash mismatch')
+    argv=[str(cl),'/nologo','/Od','/std:c11','/DMH_REAL_SMALL_DEPS','/I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'/I',str(ROOT/'recomp'),'/I',str(ROOT/'runtime'),'/I',str(base),'/Fo'+str(base/'short-test.obj'),'/Fe'+str(exe),str(ROOT/'tests/time_candidate_native.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'time-native-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('time native test build failed')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    ran=_run_job([str(exe)],30,'time-native-run',cfg,max_processes=1,memory_mb=256)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('time native test failed')
+    compared=_run_job([sys.executable,str(ROOT/'tests/compare_time_native.py')],30,'time-native-compare',cfg,max_processes=1,memory_mb=256)
+    if compared['returncode']!=0 or compared['timed_out']:raise WorkSafeError('time comparison mismatch; inspect logs')
+    fault_results={}
+    for mode,expected in (('null-object',70),('missing-timer',74),('missing-virtual',75),('null-virtual-object',71)):
+        reference=probe_time_candidate_x86(mode)
+        if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+        fault=_run_job([str(exe),'--'+mode],30,'time-native-'+mode,cfg,max_processes=1,memory_mb=256)
+        if fault['timed_out'] or fault['returncode']!=expected:raise WorkSafeError('time fault test mismatch: '+mode)
+        fault_results[mode]={'reference':reference,'native':fault}
+    return {'prepare':prepared,'copy_prepare':copy_prepared,'indirect_prepare':indirect_prepared,'build':built,'run':ran,'comparison':compared,'faults':fault_results}
+
+def compare_time_indirect_zero():
+    """Compare the isolated zero-argument virtual branch with synthetic methods."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    prior=compare_time_candidate_native()
+    ref=_run_job([sys.executable,str(ROOT/'tools/probe_time_indirect_zero_x86.py')],30,'time-indirect-zero-x86',cfg,max_processes=1,memory_mb=512)
+    if ref['returncode']!=0 or ref['timed_out']:raise WorkSafeError('zero-argument x86 reference failed')
+    exe=ROOT/'private/analysis/candidate_time/short-test.exe'
+    native=_run_job([str(exe),'--virtual-zero'],30,'time-indirect-zero-native',cfg,max_processes=1,memory_mb=256)
+    if native['returncode']!=0 or native['timed_out']:raise WorkSafeError('zero-argument native test failed')
+    compare=_run_job([sys.executable,str(ROOT/'tests/compare_time_indirect_zero.py')],30,'time-indirect-zero-compare',cfg,max_processes=1,memory_mb=256)
+    if compare['returncode']!=0 or compare['timed_out']:raise WorkSafeError('zero-argument comparison mismatch')
+    return {'prior':prior,'x86':ref,'native':native,'comparison':compare}
+
+def lift_game_candidate(x87=False):
+    """Analyze an ordinary .text candidate; generated source remains private."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient available RAM for static analysis')
+    if not isinstance(x87,bool): raise WorkSafeError('invalid x87 profile')
+    argv=[sys.executable,str(ROOT/'tools'/'lift_candidate.py')]+(['--x87'] if x87 else [])
+    return _run_job(argv,30,'pcrecomp-candidate-x87' if x87 else 'pcrecomp-candidate',cfg,max_processes=1,memory_mb=384)
+
+def lift_graphics_candidate():
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    return _run_job([sys.executable,str(ROOT/'tools'/'lift_graphics_candidate.py')],30,'pcrecomp-graphics-candidate',cfg,max_processes=1,memory_mb=384)
+
+def lift_input_candidate():
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    return _run_job([sys.executable,str(ROOT/'tools'/'lift_input_candidate.py')],30,'pcrecomp-input-candidate',cfg,max_processes=1,memory_mb=384)
+
+def lift_d3d8_thunk():
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    return _run_job([sys.executable,str(ROOT/'tools'/'lift_d3d8_thunk.py')],30,'pcrecomp-d3d8-thunk',cfg,max_processes=1,memory_mb=384)
+
+def lift_dinput8_thunk():
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    return _run_job([sys.executable,str(ROOT/'tools'/'lift_dinput8_thunk.py')],30,'pcrecomp-dinput8-thunk',cfg,max_processes=1,memory_mb=384)
+
+def list_android_devices():
+    """Read ADB device states only; never install, launch, or modify a device."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    if not adb.is_file():raise WorkSafeError('Android SDK adb missing')
+    return _run_job([str(adb),'devices','-l'],15,'android-devices',cfg,max_processes=4,memory_mb=256)
+
+def build_android_device_tests():
+    """Cross-compile only synthetic memory and PE tests for a future device run."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    out=ROOT/'build'/'device-tests';out.mkdir(parents=True,exist_ok=True)
+    common=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-fPIE','-pie','-Wall','-Wextra','-Werror','-I',str(ROOT/'runtime')]
+    specs=[('guest_memory_test',['runtime/guest_memory.c','tests/test_guest_memory.c']),
+           ('pe32_test',['runtime/guest_memory.c','runtime/pe32_image.c','runtime/pe32_imports.c','runtime/pe32_import_plan.c','tests/test_pe_image.c'])]
+    results={}
+    for name,paths in specs:
+        if available_memory_mb()<1536:raise WorkSafeError('insufficient RAM for Android test compilation')
+        argv=common+[str(ROOT/path) for path in paths]+['-o',str(out/name)]
+        result=_run_job(argv,60,'android-device-build-'+name,cfg,max_processes=4,memory_mb=512)
+        results[name]=result
+        if result['returncode']!=0 or result['timed_out']:return {'builds':results,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_device_tests.py')],30,'android-device-build-verify',cfg,max_processes=1,memory_mb=256)
+    return {'builds':results,'verify':verified}
+
+def build_android_dispatch_test():
+    """Cross-compile the synthetic fail-closed dispatch test for Android ARM64."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    out=ROOT/'build'/'device-tests';out.mkdir(parents=True,exist_ok=True)
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-fPIE','-pie','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),str(ROOT/'tests/test_checked_dispatch.c'),str(ROOT/'runtime/win_tick.c'),str(ROOT/'runtime/android_boot_clock.c'),'-o',str(out/'dispatch_test')]
+    built=_run_job(argv,60,'android-dispatch-build',cfg,max_processes=4,memory_mb=512)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools/verify_dispatch_device.py')],30,'android-dispatch-verify',cfg,max_processes=1,memory_mb=256)
+    return {'build':built,'verify':verified}
+
+def run_android_device_tests(dispatch_only=False):
+    """Run only fixed synthetic test binaries on one authorized Galaxy S25.
+
+    Creates a fresh random directory, checks uploaded hashes, then removes only
+    the selected files and that directory. No APK, game files or UI are touched.
+    """
+    import hashlib,re,secrets
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if not isinstance(dispatch_only,bool):raise WorkSafeError('invalid device test profile')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    if not adb.is_file():raise WorkSafeError('Android SDK adb missing')
+    base=ROOT/'build'/'device-tests';manifest=json.loads((base/('dispatch_manifest.json' if dispatch_only else 'manifest.json')).read_text(encoding='utf-8'))
+    expected_names=['dispatch_test'] if dispatch_only else ['guest_memory_test','pe32_test']
+    if manifest.get('abi')!='arm64-v8a' or [x['name'] for x in manifest['tests']]!=expected_names:
+        raise WorkSafeError('unexpected device test manifest')
+    for item in manifest['tests']:
+        path=base/item['name']
+        if hashlib.sha256(path.read_bytes()).hexdigest()!=item['sha256']:raise WorkSafeError('device test hash mismatch')
+    def command(args,label,timeout=30,expected=0):
+        if not label.startswith('cleanup-') and available_memory_mb()<1024:
+            raise WorkSafeError('memory pressure during device test')
+        result=_run_job([str(adb)]+args,timeout,'device-'+label,cfg,max_processes=4,memory_mb=256)
+        if result['timed_out'] or result['returncode']!=expected:raise WorkSafeError('ADB '+label+' failed; see its logs')
+        return Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip()
+    listing=command(['devices','-l'],'list',15)
+    entries=[line.split() for line in listing.splitlines()[1:] if line.strip()]
+    ready=[parts[0] for parts in entries if len(parts)>=2 and parts[1]=='device']
+    if len(ready)!=1:raise WorkSafeError('need exactly one authorized ADB device')
+    serial=ready[0]
+    if not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',serial):raise WorkSafeError('invalid ADB serial')
+    prefix=['-s',serial]
+    model=command(prefix+['shell','getprop','ro.product.model'],'model',15)
+    abi=command(prefix+['shell','getprop','ro.product.cpu.abilist'],'abi',15)
+    if not model.upper().startswith(('SM-S931','SM-S936','SM-S937','SM-S938','SM-S731')):
+        raise WorkSafeError('the authorized device is not an identified Galaxy S25')
+    if 'arm64-v8a' not in abi.split(','):raise WorkSafeError('device does not report arm64-v8a')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8)
+    intent=ROOT/'logs'/'device-last-directory.json';intent.parent.mkdir(exist_ok=True)
+    intent.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'},indent=2)+'\n',encoding='utf-8')
+    try:command(prefix+['shell','mkdir',remote],'mkdir',15)
+    except WorkSafeError as exc:raise WorkSafeError('ADB mkdir result uncertain; attempted directory recorded in device-last-directory.json') from exc
+    cleanup=[];results={}
+    try:
+        for item in manifest['tests']:
+            name=item['name'];dest=remote+'/'+name;cleanup.append(dest)
+            command(prefix+['push',str(base/name),dest],'push-'+name,30)
+            remote_hash=command(prefix+['shell','sha256sum',dest],'hash-'+name,15).split()
+            if not remote_hash or remote_hash[0].lower()!=item['sha256']:raise WorkSafeError('device test hash mismatch')
+            command(prefix+['shell','chmod','700',dest],'chmod-'+name,15)
+            command(prefix+['shell',dest],'run-'+name,30)
+            if dispatch_only:
+                for argument in ('missing-call','missing-tail','missing-precise'):
+                    command(prefix+['shell',dest,'--'+argument],'run-'+argument,30,expected=74)
+            results[name]='passed'
+    finally:
+        # Exact files in the newly created directory only; never recursive.
+        try:
+            if cleanup:command(prefix+['shell','rm','-f']+cleanup,'cleanup-files',15)
+            command(prefix+['shell','rmdir',remote],'cleanup-dir',15)
+            intent.write_text(json.dumps({'remote_directory':remote,'cleanup':'confirmed'},indent=2)+'\n',encoding='utf-8')
+        except WorkSafeError:
+            results['cleanup']='failed; see device cleanup logs'
+    return {'model':model,'abi':abi,'tests':results}
+
+def run_android_dispatch_single_session():
+    """Upload, test and clean one synthetic binary in one bounded ADB shell."""
+    import base64,hashlib,re,secrets,textwrap
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe';base=ROOT/'build'/'device-tests'
+    if not adb.is_file():raise WorkSafeError('Android SDK adb missing')
+    manifest=json.loads((base/'dispatch_manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('abi')!='arm64-v8a' or [x['name'] for x in manifest['tests']]!=['dispatch_test']:raise WorkSafeError('unexpected dispatch manifest')
+    binary=(base/'dispatch_test').read_bytes();digest=hashlib.sha256(binary).hexdigest()
+    if digest!=manifest['tests'][0]['sha256'] or len(binary)>1024*1024:raise WorkSafeError('dispatch binary hash or size mismatch')
+    listing=_run_job([str(adb),'devices','-l'],15,'device-dispatch-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0:raise WorkSafeError('ADB device listing failed')
+    text=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    entries=[line.split() for line in text.splitlines()[1:] if line.strip()]
+    ready=[parts[0] for parts in entries if len(parts)>=2 and parts[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    if available_memory_mb()<1024:raise WorkSafeError('memory pressure before device session')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8)
+    encoded='\n'.join(textwrap.wrap(base64.b64encode(binary).decode('ascii'),76))
+    script=(
+        'model=$(getprop ro.product.model)\n'
+        'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) echo MHAE_BAD_MODEL; exit 70;; esac\n'
+        'abi=$(getprop ro.product.cpu.abilist)\n'
+        'case ",$abi," in *,arm64-v8a,*) ;; *) echo MHAE_BAD_ABI; exit 71;; esac\n'
+        'printf "MHAE_MODEL=%s\\nMHAE_ABI=%s\\n" "$model" "$abi"\n'
+        f'd={remote}\n'
+        'p="$d/dispatch_test"\n'
+        'if ! mkdir "$d"; then echo MHAE_MKDIR_FAILED; exit 72; fi\n'
+        'cleanup() { rm -f "$p" && rmdir "$d"; }\n'
+        'finish() { rc=$?; trap - EXIT; if cleanup; then echo MHAE_CLEANUP_OK; else echo MHAE_CLEANUP_FAILED >&2; if [ "$rc" -eq 0 ]; then rc=91; fi; fi; exit "$rc"; }\n'
+        'trap finish EXIT\ntrap "exit 93" HUP INT TERM\n'
+        'if ! base64 -d > "$p" <<\'MHAE_PAYLOAD\'\n'+encoded+'\nMHAE_PAYLOAD\n'
+        'then echo MHAE_DECODE_FAILED; exit 73; fi\n'
+        'set -- $(sha256sum "$p")\n'
+        f'if [ "${{1:-}}" != "{digest}" ]; then echo MHAE_HASH_FAILED; exit 74; fi\n'
+        'if ! chmod 700 "$p"; then echo MHAE_CHMOD_FAILED; exit 75; fi\n'
+        'if ! "$p"; then echo MHAE_SUCCESS_CASE_FAILED; exit 76; fi\n'
+        'for arg in missing-call missing-tail missing-precise; do\n'
+        '  "$p" "--$arg"; rc=$?\n'
+        '  if [ "$rc" -ne 74 ]; then echo MHAE_EXPECTED_FAILURE_MISMATCH; exit 77; fi\n'
+        'done\n'
+        '"$p" --tick-return-mismatch; rc=$?\n'
+        'if [ "$rc" -ne 78 ]; then echo MHAE_RETURN_MISMATCH_NOT_REJECTED; exit 78; fi\n'
+        'echo MHAE_TESTS_PASSED\nexit 0\n').encode('ascii')
+    shell=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Git'/'bin'/'sh.exe'
+    if not shell.is_file():raise WorkSafeError('Git shell missing for syntax-only validation')
+    syntax=_run_job([str(shell),'-n'],15,'device-dispatch-shell-check',cfg,max_processes=2,memory_mb=256,input_bytes=script)
+    if syntax['timed_out'] or syntax['returncode']!=0:raise WorkSafeError('device script failed syntax check')
+    attempt=ROOT/'logs'/'device-dispatch-attempt.json';attempt.parent.mkdir(exist_ok=True)
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'},indent=2)+'\n',encoding='utf-8')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],45,'device-dispatch-session',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    cleanup='confirmed' if 'MHAE_CLEANUP_OK' in output else 'unconfirmed'
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':cleanup},indent=2)+'\n',encoding='utf-8')
+    if result['timed_out'] or result['returncode']!=0 or cleanup!='confirmed' or 'MHAE_TESTS_PASSED' not in output:
+        raise WorkSafeError('dispatch session failed or cleanup unconfirmed; inspect device-dispatch logs')
+    models=re.findall(r'^MHAE_MODEL=(\S+)\s*$',output,re.MULTILINE)
+    if len(models)!=1:raise WorkSafeError('device model result missing')
+    return {'model':models[0],'abi':'arm64-v8a','tests':{'dispatch_test':'passed'},'cleanup':cleanup}
+
+def inspect_android_temp_dirs():
+    """Read only the names of project-prefixed temporary directories on one S25."""
+    import re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    if not adb.is_file():raise WorkSafeError('Android SDK adb missing')
+    listing=_run_job([str(adb),'devices','-l'],15,'device-temp-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0:raise WorkSafeError('ADB device listing failed')
+    text=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    entries=[line.split() for line in text.splitlines()[1:] if line.strip()]
+    ready=[parts[0] for parts in entries if len(parts)>=2 and parts[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    script=(b'model=$(getprop ro.product.model)\n'
+            b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            b'find /data/local/tmp -maxdepth 1 -type d -name "mhae_*" -print\n')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],20,'device-temp-inspect',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('read-only device directory inspection failed')
+    lines=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()
+    if any(not re.fullmatch(r'/data/local/tmp/mhae_[0-9a-f]{16}',line) for line in lines):raise WorkSafeError('unexpected device directory listing')
+    return lines
+
+def inspect_s25_game_destination():
+    """Read model, free storage and requested destination state; no device writes."""
+    import re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    if not adb.is_file():raise WorkSafeError('Android SDK adb missing')
+    listing=_run_job([str(adb),'devices','-l'],15,'device-data-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0:raise WorkSafeError('ADB device listing failed')
+    text=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    entries=[line.split() for line in text.splitlines()[1:] if line.strip()]
+    ready=[parts[0] for parts in entries if len(parts)>=2 and parts[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    script=(b'model=$(getprop ro.product.model)\n'
+            b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            b'printf "MHAE_MODEL=%s\\n" "$model"\n'
+            b'if [ -e /sdcard/mh-androidevolved ]; then echo MHAE_DEST_EXISTS; else echo MHAE_DEST_ABSENT; fi\n'
+            b'echo MHAE_DF_BEGIN\ndf -k /sdcard\n')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],20,'device-data-inspect',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('read-only destination inspection failed')
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    if 'MHAE_DF_BEGIN' not in output or not re.search(r'^MHAE_MODEL=SM-S(?:931|936|937|938|731)\S*$',output,re.MULTILINE):raise WorkSafeError('unexpected device response')
+    return output
+
+def copy_game_to_s25():
+    """Copy the user's local game into a new, exclusively created S25 folder."""
+    import re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    source=ROOT/'Manhunt Collection'/'Manhunt'
+    if not source.is_dir(): raise WorkSafeError('local game directory missing')
+    count=0; total=0
+    for directory, dirs, files in os.walk(source,followlinks=False):
+        for name in dirs+files:
+            path=Path(directory)/name
+            info=path.stat(follow_symlinks=False)
+            if info.st_file_attributes & 0x400: raise WorkSafeError('source contains a reparse point')
+            if name in files: count+=1; total+=info.st_size
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    listing=_run_job([str(adb),'devices','-l'],15,'game-copy-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0: raise WorkSafeError('ADB device listing failed')
+    lines=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()[1:]
+    ready=[p[0] for line in lines if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]): raise WorkSafeError('need exactly one authorized ADB device')
+    serial=ready[0]
+    # mkdir itself is atomic: fail if another process created the destination.
+    check=(b'set -e\nmodel=$(getprop ro.product.model)\n'
+           b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+           + f"free=$(df -k /sdcard | awk 'NR==2 {{print $4}}')\n[ \"$free\" -ge {(total+2*1024**3+1023)//1024} ] || exit 71\n".encode()
+           + b'mkdir /sdcard/mh-androidevolved\necho MHAE_CREATED\n')
+    made=_run_job([str(adb),'-s',serial,'shell','-T','sh'],30,'game-copy-create',cfg,max_processes=4,memory_mb=256,input_bytes=check)
+    if made['timed_out'] or made['returncode']!=0 or 'MHAE_CREATED' not in Path(made['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace'):
+        raise WorkSafeError('destination creation failed or uncertain; inspect before retrying')
+    children=sorted(source.iterdir(),key=lambda p:p.name.lower())
+    copied=_run_job([str(adb),'-s',serial,'push','-Z','-q',*[str(p) for p in children],'/sdcard/mh-androidevolved/'],1800,'game-copy-transfer',cfg,max_processes=4,memory_mb=512)
+    if copied['timed_out'] or copied['returncode']!=0:
+        raise WorkSafeError('transfer incomplete; preserve destination and inspect game-copy-transfer logs')
+    return {'source_files':count,'source_bytes':total,'transfer':'completed','destination':'/sdcard/mh-androidevolved'}
+
+def verify_game_on_s25():
+    """Read-only verification of file count, bytes, and the expected executable."""
+    import hashlib,re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    source=ROOT/'Manhunt Collection'/'Manhunt'; count=0; total=0
+    for directory, dirs, files in os.walk(source,followlinks=False):
+        for name in dirs+files:
+            info=(Path(directory)/name).stat(follow_symlinks=False)
+            if info.st_file_attributes & 0x400: raise WorkSafeError('source contains a reparse point')
+            if name in files: count+=1; total+=info.st_size
+    digest=hashlib.sha256((source/'manhunt.exe').read_bytes()).hexdigest()
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    listing=_run_job([str(adb),'devices','-l'],15,'game-verify-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0: raise WorkSafeError('ADB device listing failed')
+    lines=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()[1:]
+    ready=[p[0] for line in lines if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]): raise WorkSafeError('need exactly one authorized ADB device')
+    script=(b'set -e\nmodel=$(getprop ro.product.model)\n'
+            b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            b'echo MHAE_SIZES\nfind /sdcard/mh-androidevolved -type f -exec stat -c %s {} + | awk \'{n++;s+=$1} END {printf "%.0f %.0f\\n",n,s}\'\n'
+            b'echo MHAE_EXE\nsha256sum /sdcard/mh-androidevolved/manhunt.exe\n')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],180,'game-verify',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    if result['timed_out'] or result['returncode']!=0: raise WorkSafeError('device verification failed')
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    match=re.search(r'MHAE_SIZES\s+(\d+)\s+(\d+)\s+MHAE_EXE\s+([0-9a-f]{64})\s+',output)
+    if not match: raise WorkSafeError('unexpected verification output')
+    device_count,device_total=int(match[1]),int(match[2])
+    if (device_count,device_total,match[3])!=(count,total,digest): raise WorkSafeError('device copy verification mismatch: '+output)
+    return {'files':count,'bytes':total,'executable_sha256':digest,'verification':'counts, total bytes, executable SHA-256'}
+
+def compile_android_resources():
+    """Compile Android resources only, without Gradle or producing an APK."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    aapt=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'build-tools'/'35.0.0'/'aapt2.exe'
+    if not aapt.is_file(): raise WorkSafeError('aapt2 missing')
+    output=ROOT/'build'/'android-resource-check';output.mkdir(parents=True,exist_ok=True)
+    result=_run_job([str(aapt),'compile','--dir',str(ROOT/'android/app/src/main/res'),'-o',str(output/'compiled.zip')],120,'android-resources-compile',cfg,max_processes=1,memory_mb=512)
+    if result['timed_out'] or result['returncode']!=0: raise WorkSafeError('resource compilation failed; inspect android-resources-compile logs')
+    return result
+
+def test_import_registry():
+    """Compile the synthetic registry tests to WASM and run them headlessly."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'
+    clang=sdk/'ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe'
+    node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs/node.exe'
+    if not clang.is_file() or not node.is_file():raise WorkSafeError('test tools missing')
+    out=ROOT/'build/wasm-test';out.mkdir(parents=True,exist_ok=True);binary=out/'import_registry.wasm'
+    argv=[str(clang),'--target=wasm32-unknown-unknown','-ffreestanding','-fno-builtin','-nostdlib','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'tests/wasm_include'),'-I',str(ROOT/'runtime'),str(ROOT/'runtime/guest_memory.c'),str(ROOT/'runtime/import_registry.c'),str(ROOT/'runtime/win_tick.c'),str(ROOT/'runtime/win_tick_x86.c'),str(ROOT/'tests/wasm_memmove.c'),str(ROOT/'tests/test_import_registry.c'),str(ROOT/'tests/test_win_tick.c'),'-Wl,--no-entry','-Wl,--export=mh_registry_tests','-Wl,--export=mh_tick_tests','-o',str(binary)]
+    built=_run_job(argv,60,'import-registry-build',cfg,max_processes=2,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('registry test build failed')
+    js="const fs=require('fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(x=>{for(const n of ['mh_registry_tests','mh_tick_tests']){let r=x.instance.exports[n](); if(r){console.error(n,'failed line',r);process.exit(1)}} console.log('registry and tick tests passed')}).catch(e=>{console.error(e);process.exit(1)})"
+    tested=_run_job([str(node),'-e',js,str(binary)],30,'import-registry-test',cfg,max_processes=1,memory_mb=256)
+    if tested['returncode']!=0 or tested['timed_out']:raise WorkSafeError('registry tests failed')
+    return tested
+
+def check_android_boot_clock():
+    """Compile the Android boot-clock provider to ARM64 without linking."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    clang=ndk/'bin/clang.exe';out=ROOT/'build/android-native-check';out.mkdir(parents=True,exist_ok=True)
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'runtime'),'-c',str(ROOT/'runtime/android_boot_clock.c'),'-o',str(out/'android_boot_clock.o')]
+    result=_run_job(argv,60,'android-boot-clock-check',cfg,max_processes=2,memory_mb=384)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('Android clock compile failed; inspect logs')
+    return result
+
+def test_import_registry_on_s25():
+    """Build and run synthetic registry and PE integration tests on an S25."""
+    import base64,hashlib,re,secrets,textwrap
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk';ndk=sdk/'ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    clang=ndk/'bin/clang.exe';adb=sdk/'platform-tools/adb.exe'
+    if not clang.is_file() or not adb.is_file():raise WorkSafeError('Android build tools missing')
+    out=ROOT/'build/device-tests';out.mkdir(parents=True,exist_ok=True)
+    main=out/'registry_main.c';main.write_text('int mh_registry_tests(void); int mh_pe_tests(void); int mh_tick_tests(void); int main(void){int r=mh_registry_tests();if(r)return r;r=mh_pe_tests();return r?r:mh_tick_tests();}\n',encoding='ascii')
+    binary=out/'registry_test'
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-Wall','-Wextra','-Werror','-DMH_NO_MAIN','-DMH_TEST_IMPORT_REGISTRY','-DMH_TEST_ANDROID_BOOT_CLOCK','-I',str(ROOT/'runtime'),str(ROOT/'runtime/guest_memory.c'),str(ROOT/'runtime/pe32_image.c'),str(ROOT/'runtime/pe32_imports.c'),str(ROOT/'runtime/pe32_import_plan.c'),str(ROOT/'runtime/import_registry.c'),str(ROOT/'runtime/win_tick.c'),str(ROOT/'runtime/win_tick_x86.c'),str(ROOT/'runtime/android_boot_clock.c'),str(ROOT/'tests/test_import_registry.c'),str(ROOT/'tests/test_pe_image.c'),str(ROOT/'tests/test_win_tick.c'),str(main),'-o',str(binary)]
+    built=_run_job(argv,60,'registry-arm64-build',cfg,max_processes=4,memory_mb=512)
+    if built['timed_out'] or built['returncode']!=0:raise WorkSafeError('ARM64 registry build failed')
+    payload=binary.read_bytes()
+    if len(payload)>1024*1024 or payload[:4]!=b'\x7fELF' or payload[18:20]!=b'\xb7\x00':raise WorkSafeError('unexpected ARM64 test binary')
+    digest=hashlib.sha256(payload).hexdigest()
+    listing=_run_job([str(adb),'devices','-l'],15,'registry-device-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0:raise WorkSafeError('ADB device listing failed')
+    lines=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()[1:]
+    ready=[p[0] for line in lines if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8)
+    encoded='\n'.join(textwrap.wrap(base64.b64encode(payload).decode('ascii'),76))
+    script=('model=$(getprop ro.product.model)\ncase "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            'case ",$(getprop ro.product.cpu.abilist)," in *,arm64-v8a,*) ;; *) exit 71;; esac\n'
+            f'd={remote}\np="$d/registry_test"\n'
+            'mkdir "$d" || exit 72\n'
+            'finish() { rc=$?; trap - EXIT; if rm -f "$p" && rmdir "$d"; then echo MHAE_CLEANUP_OK; else rc=91; fi; exit "$rc"; }\n'
+            'trap finish EXIT\ntrap "exit 93" HUP INT TERM\n'
+            'base64 -d > "$p" <<\'MHAE_PAYLOAD\'\n'+encoded+'\nMHAE_PAYLOAD\n'
+            'set -- $(sha256sum "$p")\n'+f'[ "${{1:-}}" = "{digest}" ] || exit 74\n'+
+            'chmod 700 "$p" || exit 75\n"$p" || exit 76\necho MHAE_TESTS_PASSED\n').encode('ascii')
+    shell=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Git/bin/sh.exe'
+    if not shell.is_file():raise WorkSafeError('Git shell missing for syntax-only validation')
+    syntax=_run_job([str(shell),'-n'],15,'registry-device-shell-check',cfg,max_processes=2,memory_mb=256,input_bytes=script)
+    if syntax['timed_out'] or syntax['returncode']!=0:raise WorkSafeError('registry device script syntax failed')
+    attempt=ROOT/'logs/registry-device-attempt.json';attempt.parent.mkdir(exist_ok=True)
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'},indent=2)+'\n',encoding='utf-8')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],60,'registry-device-test',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    cleaned='MHAE_CLEANUP_OK' in output
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'confirmed' if cleaned else 'unconfirmed'},indent=2)+'\n',encoding='utf-8')
+    if result['timed_out'] or result['returncode']!=0 or not cleaned or 'MHAE_TESTS_PASSED' not in output:raise WorkSafeError('registry device test failed or cleanup unconfirmed')
+    return {'tests':'registry, synthetic PE integration and Android boot clock passed','abi':'arm64-v8a','sha256':digest,'cleanup':'confirmed'}
+
+def build_diagnostic_apk():
+    """Build a private diagnostic APK in bounded sequential jobs, without Gradle."""
+    import sys, zipfile, xml.etree.ElementTree as ET
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'; tools=sdk/'build-tools'/'35.0.0'
+    java=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Android'/'Android Studio'/'jbr'/'bin'/'java.exe'
+    android=sdk/'platforms'/'android-35'/'android.jar'; key=Path.home()/'.android'/'debug.keystore'
+    aapt=tools/'aapt2.exe'; align=tools/'zipalign.exe'; d8=tools/'lib'/'d8.jar'; signer=tools/'lib'/'apksigner.jar'
+    lib=ROOT/'build/android-cmake-check/libmh_runtime.so'; src=ROOT/'android/app/src/main'
+    if not all(p.is_file() for p in (java,android,key,aapt,align,d8,signer,lib)):
+        raise WorkSafeError('diagnostic build prerequisites missing')
+    native_sources=[src/'cpp/native_diagnostics.c',*list((ROOT/'runtime').glob('*.c')),*list((ROOT/'runtime').glob('*.h'))]
+    if any(p.stat().st_mtime>lib.stat().st_mtime for p in native_sources): raise WorkSafeError('native library may be stale; rebuild it first')
+    def run(argv,name,seconds=120,memory=512):
+        if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM; diagnostic build paused')
+        r=_run_job(argv,seconds,name,cfg,max_processes=1,memory_mb=memory)
+        if r['timed_out'] or r['returncode']!=0: raise WorkSafeError(name+' failed; inspect its logs')
+        return r
+    checked=check_android_java()
+    if checked['timed_out'] or checked['returncode']!=0: raise WorkSafeError('Java compilation failed')
+    compile_android_resources()
+    out=ROOT/'build/android-diagnostic-apk';out.mkdir(parents=True,exist_ok=True)
+    manifest=ET.parse(src/'AndroidManifest.xml'); root=manifest.getroot();root.set('package','com.manhuntae.android')
+    ns='http://schemas.android.com/apk/res/android';ET.register_namespace('android',ns)
+    root.set('{%s}versionCode'%ns,'1');root.set('{%s}versionName'%ns,'0.1-research')
+    root.find('application').set('{%s}extractNativeLibs'%ns,'true')
+    manifest.write(out/'AndroidManifest.xml',encoding='utf-8',xml_declaration=True)
+    unsigned=out/'resources.apk'
+    run([str(aapt),'link','-o',str(unsigned),'-I',str(android),'--manifest',str(out/'AndroidManifest.xml'),'--min-sdk-version','29','--target-sdk-version','35','-A',str(src/'assets'),str(ROOT/'build/android-resource-check/compiled.zip')],'diagnostic-aapt-link')
+    classes=sorted((ROOT/'build/android-java-check').rglob('*.class'))
+    if not classes:raise WorkSafeError('no compiled Java classes')
+    run([str(java),'-Xmx256m','-Djava.awt.headless=true','-cp',str(d8),'com.android.tools.r8.D8','--min-api','29','--output',str(out),*[str(p) for p in classes]],'diagnostic-d8')
+    with zipfile.ZipFile(unsigned,'a',compression=zipfile.ZIP_DEFLATED) as apk:
+        apk.write(out/'classes.dex','classes.dex');apk.write(lib,'lib/arm64-v8a/libmh_runtime.so')
+    aligned=out/'aligned.apk'; signed=out/'diagnostic-debug.apk'
+    run([str(align),'-f','4',str(unsigned),str(aligned)],'diagnostic-zipalign')
+    run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'sign','--ks',str(key),'--ks-pass','pass:android','--key-pass','pass:android','--out',str(signed),str(aligned)],'diagnostic-sign')
+    run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'verify','--verbose',str(signed)],'diagnostic-sign-verify')
+    return {'apk':str(signed),'scope':'diagnostic only, not a playable game'}
+
+def install_diagnostic_on_s25():
+    """Install the diagnostic package only if its application ID is absent."""
+    import re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    apk=ROOT/'build/android-diagnostic-apk/diagnostic-debug.apk'
+    if not apk.is_file():raise WorkSafeError('diagnostic APK missing')
+    def run(args,name,seconds=30,input_bytes=None):
+        result=_run_job([str(adb),*args],seconds,name,cfg,max_processes=4,memory_mb=256,input_bytes=input_bytes)
+        if result['timed_out'] or result['returncode']!=0:raise WorkSafeError(name+' failed; inspect logs')
+        return Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    listing=run(['devices','-l'],'diagnostic-device-list')
+    ready=[p[0] for line in listing.splitlines()[1:] if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    serial=ready[0]
+    script=(b'set -e\nmodel=$(getprop ro.product.model)\n'
+            b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            b'[ "$(getprop ro.product.cpu.abi)" = arm64-v8a ] || exit 71\n'
+            b'if pm path com.manhuntae.android | grep -q .; then exit 72; fi\n'
+            b'echo MHAE_PACKAGE_ABSENT\n')
+    if 'MHAE_PACKAGE_ABSENT' not in run(['-s',serial,'shell','-T','sh'],'diagnostic-install-preflight',input_bytes=script):
+        raise WorkSafeError('package state uncertain')
+    output=run(['-s',serial,'install',str(apk)],'diagnostic-install',120)
+    if 'Success' not in output:raise WorkSafeError('installation result uncertain')
+    return {'installation':'success','package':'com.manhuntae.android','scope':'diagnostic only'}
+
+def launch_diagnostic_on_s25():
+    """Start the installed diagnostic activity on one authorized S25."""
+    import re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    listing=_run_job([str(adb),'devices','-l'],15,'diagnostic-launch-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0:raise WorkSafeError('device list failed')
+    lines=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()[1:]
+    ready=[p[0] for line in lines if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    script=(b'set -e\nmodel=$(getprop ro.product.model)\n'
+            b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            b'am start -W -n com.manhuntae.android/.MainActivity\n'
+            b'echo MHAE_PID\npidof com.manhuntae.android\n')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],45,'diagnostic-launch',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('diagnostic launch failed; inspect logs')
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    if 'Status: ok' not in output or not re.search(r'MHAE_PID\s+\d+',output):raise WorkSafeError('activity or process not confirmed')
+    return output
+
+def inspect_diagnostic_ui_on_s25():
+    """Inspect the foreground diagnostic app's accessibility text, then clean up."""
+    import re, secrets, xml.etree.ElementTree as ET
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    listing=_run_job([str(adb),'devices','-l'],15,'diagnostic-ui-list',cfg,max_processes=4,memory_mb=256)
+    if listing['timed_out'] or listing['returncode']!=0:raise WorkSafeError('device list failed')
+    lines=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()[1:]
+    ready=[p[0] for line in lines if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8)
+    script=(b'set -e\nmodel=$(getprop ro.product.model)\n'
+            b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            b'dumpsys activity activities | grep -E "mResumedActivity|topResumedActivity" | grep -q "com.manhuntae.android/" || exit 71\n'
+            +f'd={remote}\n'.encode()+
+            b'mkdir "$d"\ntrap \'rm -f "$d/ui.xml"; rmdir "$d"\' EXIT\n'
+            b'uiautomator dump "$d/ui.xml" >/dev/null\n'
+            b'dumpsys activity activities | grep -E "mResumedActivity|topResumedActivity" | grep -q "com.manhuntae.android/" || exit 72\n'
+            b'cat "$d/ui.xml"\n')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],90,'diagnostic-ui-inspect',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    if result['timed_out'] or result['returncode']!=0:raise WorkSafeError('foreground diagnostic UI inspection failed; inspect logs')
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    try:root=ET.fromstring(output)
+    except ET.ParseError as exc:raise WorkSafeError('unexpected UI dump') from exc
+    packages={node.attrib.get('package') for node in root.iter('node') if node.attrib.get('package')}
+    if packages!={'com.manhuntae.android'}:raise WorkSafeError('UI includes another package; not interpreting contents')
+    return [node.attrib['text'] for node in root.iter('node') if node.attrib.get('text')]
+
+def link_graphics_candidates():
+    """Link only the two precompiled ARM64 candidates into a relocatable object."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    linker=ndk/'bin'/'ld.lld.exe';base=ROOT/'private'/'analysis'
+    one=base/'candidate_graphics'/'candidate-arm64.o';two=base/'d3d8_thunk'/'candidate-arm64.o'
+    if not linker.is_file() or not one.is_file() or not two.is_file(): raise WorkSafeError('linker or candidate object missing')
+    output=base/'candidate_graphics'/'graphics-with-thunk-arm64.o'
+    linked=_run_job([str(linker),'-r',str(one),str(two),'-o',str(output)],30,'pcrecomp-graphics-link',cfg,max_processes=1,memory_mb=256)
+    if linked['returncode']!=0 or linked['timed_out']: return {'link':linked,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_graphics_object.py')],30,'pcrecomp-graphics-verify',cfg,max_processes=1,memory_mb=256)
+    return {'link':linked,'verify':verified}
+
+def link_input_candidates():
+    """Link the two precompiled input candidates into an ARM64 relocatable object."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';linker=ndk/'bin'/'ld.lld.exe';base=ROOT/'private'/'analysis'
+    one=base/'candidate_input'/'candidate-arm64.o';two=base/'dinput8_thunk'/'candidate-arm64.o'
+    if not linker.is_file() or not one.is_file() or not two.is_file():raise WorkSafeError('linker or candidate object missing')
+    output=base/'candidate_input'/'input-with-thunk-arm64.o'
+    linked=_run_job([str(linker),'-r',str(one),str(two),'-o',str(output)],30,'pcrecomp-input-link',cfg,max_processes=1,memory_mb=256)
+    if linked['returncode']!=0 or linked['timed_out']:return {'link':linked,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_graphics_object.py'),'--input'],30,'pcrecomp-input-verify',cfg,max_processes=1,memory_mb=256)
+    return {'link':linked,'verify':verified}
+
+def compile_checked_graphics_arm64():
+    """Compile the two audited graphics candidates with strict adapters."""
+    import hashlib,re,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    base=ROOT/'private'/'analysis';sources=[]
+    allowed={'MEM32','POP32_VAL','PUSH32','RECOMP_CALL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT','RECOMP_ICALL','RECOMP_ITAIL'}
+    for name,address in (('candidate_graphics','0x4c0830'),('d3d8_thunk','0x64408c')):
+        folder=base/name;report=json.loads((folder/'report.json').read_text(encoding='utf-8'))
+        source=(folder/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+        if report['address']!=address or hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['source_sha256']:
+            raise WorkSafeError('unexpected generated source')
+        used=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',source))
+        if not used.issubset(allowed): raise WorkSafeError('unsupported generated operations: '+str(sorted(used-allowed)))
+        sources.append(source)
+    folder=base/'candidate_graphics';wrapper=folder/'graphics_checked_unit.c'
+    wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_0064408C(void);\n'+'\n'.join(sources)+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(folder/'graphics-checked-arm64.o')]
+    built=_run_job(argv,60,'pcrecomp-graphics-checked-build',cfg,max_processes=1,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_graphics_object.py'),'--checked'],30,'pcrecomp-graphics-checked-verify',cfg,max_processes=1,memory_mb=256)
+    return {'build':built,'verify':verified}
+
+def compile_precise_graphics_arm64():
+    """Prepare audited return-address adaptations and compile one ARM64 object."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    prepared=_run_job([sys.executable,str(ROOT/'tools'/'prepare_graphics_precise.py')],30,'graphics-precise-prepare',cfg,max_processes=1,memory_mb=384)
+    if prepared['returncode']!=0 or prepared['timed_out']:return {'prepare':prepared,'build':None,'verify':None}
+    base=ROOT/'private'/'analysis';folder=base/'candidate_graphics';thunk=base/'d3d8_thunk'
+    report=json.loads((folder/'precise_report.json').read_text(encoding='utf-8'));t_report=json.loads((thunk/'report.json').read_text(encoding='utf-8'))
+    source=(folder/'candidate_precise.c').read_text(encoding='utf-8').removesuffix('\n');t_source=(thunk/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+    if hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['adapted_sha256'] or hashlib.sha256(t_source.encode('utf-8')).hexdigest()!=t_report['source_sha256']:raise WorkSafeError('source hash mismatch')
+    wrapper=folder/'graphics_precise_unit.c'
+    wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_0064408C(void);\n'+source+'\n'+t_source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(folder/'graphics-precise-arm64.o')]
+    built=_run_job(argv,60,'graphics-precise-arm64',cfg,max_processes=1,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:return {'prepare':prepared,'build':built,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_graphics_object.py'),'--precise'],30,'graphics-precise-verify',cfg,max_processes=1,memory_mb=256)
+    return {'prepare':prepared,'build':built,'verify':verified}
+
+def compile_precise_input_arm64():
+    """Adapt audited DirectInput candidate calls and compile an ARM64 object."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    prepared=_run_job([sys.executable,str(ROOT/'tools'/'prepare_input_precise.py')],30,'input-precise-prepare',cfg,max_processes=1,memory_mb=384)
+    if prepared['returncode']!=0 or prepared['timed_out']:return {'prepare':prepared,'build':None,'verify':None}
+    base=ROOT/'private'/'analysis';folder=base/'candidate_input';thunk=base/'dinput8_thunk'
+    report=json.loads((folder/'precise_report.json').read_text(encoding='utf-8'));t_report=json.loads((thunk/'report.json').read_text(encoding='utf-8'))
+    source=(folder/'candidate_precise.c').read_text(encoding='utf-8').removesuffix('\n');t_source=(thunk/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+    if hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['adapted_sha256'] or hashlib.sha256(t_source.encode('utf-8')).hexdigest()!=t_report['source_sha256']:raise WorkSafeError('source hash mismatch')
+    wrapper=folder/'input_precise_unit.c'
+    prefix='#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_00644098(void);\nvoid sub_0060F110(void);\n'
+    wrapper.write_text(prefix+source+'\n'+t_source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(folder/'input-precise-arm64.o')]
+    built=_run_job(argv,60,'input-precise-arm64',cfg,max_processes=1,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:return {'prepare':prepared,'build':built,'verify':None}
+    verified=_run_job([sys.executable,str(ROOT/'tools'/'verify_graphics_object.py'),'--input-precise'],30,'input-precise-verify',cfg,max_processes=1,memory_mb=256)
+    return {'prepare':prepared,'build':built,'verify':verified}
+
+def compile_game_candidate(kind='candidate'):
+    """Compile the locally generated single candidate for ARM64, without linking."""
+    import hashlib
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient available RAM for compilation')
+    if kind not in ('candidate', 'candidate_deterministic', 'candidate_x87', 'candidate_graphics', 'candidate_input', 'candidate_time', 'd3d8_thunk', 'dinput8_thunk'): raise WorkSafeError('unknown candidate')
+    base=ROOT/'private'/'analysis'/kind
+    report=json.loads((base/'report.json').read_text(encoding='utf-8'))
+    source=(base/'candidate.c').read_text(encoding='utf-8')
+    if hashlib.sha256(source.removesuffix('\n').encode('utf-8')).hexdigest() != report['source_sha256']:
+        raise WorkSafeError('candidate source differs from generated report')
+    wrapper=base/'translation_unit.c'
+    prototype=('void sub_0064408C(void);\n' if kind=='candidate_graphics' else
+               ('void sub_00644098(void);\nvoid sub_0060F110(void);\n' if kind=='candidate_input' else
+                ('void sub_00426EF0(void);\nvoid sub_00481330(void);\nvoid sub_00481340(void);\nvoid sub_005DAA20(void);\nvoid sub_005DAA50(void);\nvoid sub_00604D20(void);\nvoid sub_00605750(void);\nvoid sub_00608410(void);\nvoid sub_00648540(void);\n' if kind=='candidate_time' else '')))
+    wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n'+prototype+source,encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file(): raise WorkSafeError('NDK clang not found')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-c',str(wrapper),'-o',str(base/'candidate-arm64.o')]
+    return _run_job(argv,60,'pcrecomp-'+kind+'-arm64',cfg,max_processes=1,memory_mb=384)
+
+def verify_time_candidate_arm64(checked=False):
+    """Inspect one private candidate object without executing or distributing it."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if not isinstance(checked,bool):raise WorkSafeError('invalid verification profile')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    result=_run_job([sys.executable,str(ROOT/'tools/verify_graphics_object.py'),'--time-checked' if checked else '--time'],30,'time-candidate-object-verify',cfg,max_processes=1,memory_mb=256)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('timer object verification failed')
+    return result
+
+def compile_checked_time_candidate():
+    """Prepare and compile one audited timer candidate using checked adapters."""
+    import hashlib,re,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    prepared=_run_job([sys.executable,str(ROOT/'tools/prepare_time_precise.py')],30,'time-precise-prepare',cfg,max_processes=1,memory_mb=384)
+    if prepared['returncode']!=0 or prepared['timed_out']:raise WorkSafeError('precise candidate preparation failed')
+    base=ROOT/'private/analysis/candidate_time';report=json.loads((base/'precise_report.json').read_text())
+    source=(base/'candidate_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if hashlib.sha256(source.encode()).hexdigest()!=report['adapted_sha256']:raise WorkSafeError('adapted source hash mismatch')
+    used=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',source))
+    allowed={'MEM32','POP32_VAL','PUSH32','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}
+    if not used.issubset(allowed):raise WorkSafeError('unsupported operations: '+str(sorted(used-allowed)))
+    prototypes=''.join('void sub_'+name+'(void);\n' for name in ('00426EF0','00481330','00481340','005DAA20','005DAA50','00604D20','00605750','00608410','00648540'))
+    unit=base/'time_checked_unit.c';unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+prototypes+source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(base/'time-checked-arm64.o')]
+    built=_run_job(argv,60,'time-checked-build',cfg,max_processes=1,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('checked timer compilation failed')
+    return {'prepare':prepared,'build':built}
+
+def compile_time_with_small_dependencies(include_copy=False,include_indirect=False):
+    """Compile the checked private candidate and three validated dependencies."""
+    import hashlib,re,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if not isinstance(include_copy,bool) or not isinstance(include_indirect,bool) or (include_indirect and not include_copy):raise WorkSafeError('invalid dependency profile')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    prepared=compile_checked_time_candidate();base=ROOT/'private/analysis/candidate_time'
+    report=json.loads((base/'dependencies/report.json').read_text(encoding='utf-8'));items=report['items']
+    if {x['address'] for x in items}!={'0x426ef0','0x481330','0x608410'}:raise WorkSafeError('unexpected dependency set')
+    sources=[]
+    for item in items:
+        name=item['source']
+        if name not in ('dep_00426ef0.c','dep_00481330.c','dep_00608410.c'):raise WorkSafeError('unexpected dependency source')
+        source=(base/'dependencies'/name).read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(source.encode()).hexdigest()!=item['sha256']:raise WorkSafeError('dependency hash mismatch')
+        operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',source))
+        if not operations.issubset({'MEM32','RECOMP_ENTER','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported dependency operations')
+        sources.append(source)
+    if include_copy:
+        prepare_time_copy_precise()
+        copy_report=json.loads((base/'dependencies/copy_precise_report.json').read_text())
+        copy_source=(base/'dependencies/dep_00604d20_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(copy_source.encode()).hexdigest()!=copy_report['adapted_sha256']:raise WorkSafeError('copy dependency hash mismatch')
+        operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',copy_source))
+        if not operations.issubset({'MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported copy operations')
+        sources.append('void sub_00604DC0(void);\nvoid sub_00604F30(void);\n'+copy_source)
+        inner_report=json.loads((base/'dependencies/inner_report.json').read_text())
+        inner=(base/'dependencies/dep_00604f30.c').read_text(encoding='utf-8').removesuffix('\n')
+        if inner_report['address']!='0x604f30' or hashlib.sha256(inner.encode()).hexdigest()!=inner_report['source_sha256']:raise WorkSafeError('inner setter hash mismatch')
+        operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',inner))
+        if not operations.issubset({'MEM32','RECOMP_ENTER','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported inner setter operations')
+        sources.append(inner)
+    if include_indirect:
+        prepare_time_indirect_precise()
+        indirect_report=json.loads((base/'dependencies/indirect_precise_report.json').read_text())
+        indirect=(base/'dependencies/dep_00604dc0_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(indirect.encode()).hexdigest()!=indirect_report['adapted_sha256']:raise WorkSafeError('indirect source hash mismatch')
+        operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',indirect))
+        if not operations.issubset({'MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported indirect operations')
+        sources.append('void sub_00401030(void);\nvoid sub_004932F0(void);\nvoid sub_00493230(void);\n'+indirect)
+    unit=base/('time_all_unit.c' if include_indirect else ('time_copy_linked_unit.c' if include_copy else 'time_linked_unit.c'));unit.write_text((base/'time_checked_unit.c').read_text(encoding='utf-8')+'\n'+'\n'.join(sources)+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(base/('time-all-arm64.o' if include_indirect else ('time-copy-linked-arm64.o' if include_copy else 'time-linked-arm64.o')))]
+    built=_run_job(argv,60,'time-small-deps-build',cfg,max_processes=1,memory_mb=384)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('time dependency compilation failed')
+    verify=_run_job([sys.executable,str(ROOT/'tools/verify_graphics_object.py'),'--time-all' if include_indirect else ('--time-copy-linked' if include_copy else '--time-linked')],30,'time-small-deps-verify',cfg,max_processes=1,memory_mb=256)
+    if verify['returncode']!=0 or verify['timed_out']:raise WorkSafeError('time dependency object verification failed')
+    return {'prepare':prepared,'build':built,'verification':verify}
+
+def compile_checked_candidate_arm64():
+    """Compile the bounded-memory candidate for Android ARM64, without linking."""
+    import hashlib, re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient available RAM')
+    base=ROOT/'private'/'analysis'/'candidate_deterministic'
+    report=json.loads((base/'report.json').read_text(encoding='utf-8'))
+    source=(base/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+    if report['address']!='0x40a020' or hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['source_sha256']:
+        raise WorkSafeError('unexpected candidate')
+    if re.search(r'\b(?:ADDR|MEM64|MEMF|MEMD|recomp_rep_movs)\s*\(',source):
+        raise WorkSafeError('unsupported memory form')
+    wrapper=base/'checked_translation_unit.c'
+    wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n'+source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file(): raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(base/'candidate-checked-arm64.o')]
+    return _run_job(argv,60,'pcrecomp-checked-arm64',cfg,max_processes=1,memory_mb=384)
+
+def prepare_compile_x87_checked():
+    """Adapt three known float loads and compile that candidate for ARM64."""
+    import hashlib, sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    prepared=_run_job([sys.executable,str(ROOT/'tools'/'prepare_x87_checked.py')],30,'pcrecomp-x87-prepare',cfg,max_processes=1,memory_mb=256)
+    if prepared['returncode']!=0 or prepared['timed_out']: return {'prepare':prepared,'compile':None}
+    base=ROOT/'private'/'analysis'/'candidate_x87'
+    report=json.loads((base/'checked_report.json').read_text(encoding='utf-8'))
+    source=(base/'candidate_checked.c').read_text(encoding='utf-8').removesuffix('\n')
+    if hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['adapted_sha256']: raise WorkSafeError('adapted source hash mismatch')
+    wrapper=base/'checked_translation_unit.c'
+    wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n'+source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe'
+    if not clang.is_file(): raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(base/'candidate-checked-arm64.o')]
+    compiled=_run_job(argv,60,'pcrecomp-x87-checked-arm64',cfg,max_processes=1,memory_mb=384)
+    return {'prepare':prepared,'compile':compiled}
+
+def probe_candidate_x86():
+    """Run the fixed candidate in isolated Unicorn with synthetic data only."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient available RAM for isolated probe')
+    return _run_job([sys.executable,str(ROOT/'tools'/'probe_candidate_x86.py')],30,'pcrecomp-x86-reference',cfg,max_processes=1,memory_mb=384)
+
+def probe_candidate_x87(special=False):
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    if not isinstance(special,bool): raise WorkSafeError('invalid special profile')
+    argv=[sys.executable,str(ROOT/'tools'/'probe_candidate_x87.py')]+(['--special'] if special else [])
+    return _run_job(argv,30,'pcrecomp-x87-special-reference' if special else 'pcrecomp-x87-reference',cfg,max_processes=1,memory_mb=384)
+
+def compare_candidate_wasm():
+    """Compile the fixed generated candidate with test macros and compare to x86 reference."""
+    import hashlib
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient available RAM')
+    base=ROOT/'private'/'analysis'/'candidate_deterministic'
+    report=json.loads((base/'report.json').read_text(encoding='utf-8'))
+    source=(base/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+    if report['address']!='0x40a020' or hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['source_sha256']:
+        raise WorkSafeError('unexpected candidate')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    clang=ndk/'bin'/'clang.exe'; node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
+    if not clang.is_file() or not node.is_file(): raise WorkSafeError('NDK clang or Node missing')
+    argv=[str(clang),'--target=wasm32-unknown-unknown','-ffreestanding','-fno-builtin','-fno-strict-aliasing','-nostdlib','-std=c11','-I',str(base),str(ROOT/'tests'/'candidate_wasm_harness.c'),'-Wl,--no-entry','-Wl,--export=run_case','-Wl,--export=get_result','-Wl,--export=get_reg','-Wl,--export=get_flags','-Wl,--export=get_guest_memory','-Wl,--export-memory','-o',str(base/'difftest.wasm')]
+    compiled=_run_job(argv,60,'pcrecomp-difftest-build',cfg,max_processes=2,memory_mb=384)
+    if compiled['returncode'] != 0 or compiled['timed_out']: return {'compile':compiled,'test':None}
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient RAM for differential test')
+    tested=_run_job([str(node),str(ROOT/'tests'/'compare_candidate_wasm.js')],30,'pcrecomp-difftest',cfg,max_processes=1,memory_mb=256)
+    return {'compile':compiled,'test':tested}
+
+def compare_candidate_native_runtime(checked=False, x87=False, special=False):
+    """Compare one generated function with the actual PCRecomp header in a headless x64 test."""
+    import hashlib, re, sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb() < 1024: raise WorkSafeError('insufficient available RAM')
+    if not all(isinstance(x,bool) for x in (checked,x87,special)) or (x87 and not checked) or (special and not x87): raise WorkSafeError('invalid comparison profile')
+    base=ROOT/'private'/'analysis'/('candidate_x87' if x87 else 'candidate_deterministic')
+    report=json.loads((base/'report.json').read_text(encoding='utf-8'))
+    source=(base/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+    if report['address']!=('0x409960' if x87 else '0x40a020') or hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['source_sha256']:
+        raise WorkSafeError('unexpected candidate')
+    if x87:
+        adapted=(base/'candidate_checked.c').read_text(encoding='utf-8').removesuffix('\n')
+        adjusted=json.loads((base/'checked_report.json').read_text(encoding='utf-8'))
+        if adjusted['original_sha256']!=report['source_sha256'] or hashlib.sha256(adapted.encode('utf-8')).hexdigest()!=adjusted['adapted_sha256']:
+            raise WorkSafeError('unexpected adapted source')
+        source=adapted
+    if checked and re.search(r'\b(?:ADDR|recomp_rep_movs)\s*\(',source):
+        raise WorkSafeError('candidate uses memory forms not covered by adapter')
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio'/'18'/'Community'/'VC'/'Tools'/'MSVC'/'14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits'/'10'
+    cl=vs/'bin'/'Hostx64'/'x64'/'cl.exe'; sdk='10.0.26100.0'
+    include=[vs/'include',kits/'Include'/sdk/'ucrt',kits/'Include'/sdk/'shared',kits/'Include'/sdk/'um']
+    lib=[vs/'lib'/'x64',kits/'Lib'/sdk/'ucrt'/'x64',kits/'Lib'/sdk/'um'/'x64']
+    if not cl.is_file() or not all(p.is_dir() for p in include+lib): raise WorkSafeError('fixed MSVC toolchain or SDK missing')
+    env=os.environ.copy(); env['INCLUDE']=os.pathsep.join(map(str,include)); env['LIB']=os.pathsep.join(map(str,lib)); env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    label=('x87-special' if special else 'x87') if x87 else ('checked' if checked else 'native')
+    exe=base/(label+'-difftest.exe')
+    argv=[str(cl),'/nologo','/Od','/std:c11','/I',str(base),'/I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'/I',str(ROOT/'recomp'),'/I',str(ROOT/'runtime')]
+    if checked: argv.append('/DMH_CHECKED_TEST')
+    if x87: argv.append('/DMH_X87_TEST')
+    argv += ['/Fo'+str(base/(label+'-difftest.obj')),'/Fe'+str(exe),str(ROOT/'tests'/'candidate_native_runtime.c'),'/link','/INCREMENTAL:NO']
+    compiled=_run_job(argv,60,'pcrecomp-'+label+'-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if compiled['returncode']!=0 or compiled['timed_out']: return {'compile':compiled,'run':None,'compare':None}
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient RAM for native runtime test')
+    run=_run_job([str(exe)]+(['--special'] if special else []),30,'pcrecomp-'+label+'-runtime',cfg,max_processes=1,memory_mb=256)
+    if run['returncode']!=0 or run['timed_out']: return {'compile':compiled,'run':run,'compare':None}
+    compare_args=[sys.executable,str(ROOT/'tests'/'compare_candidate_native.py')]+(['--x87-special' if special else '--x87'] if x87 else (['--checked'] if checked else []))
+    compared=_run_job(compare_args,30,'pcrecomp-'+label+'-compare',cfg,max_processes=1,memory_mb=256)
+    result={'compile':compiled,'run':run,'compare':compared}
+    if checked and not x87 and compared['returncode']==0 and not compared['timed_out']:
+        for name in ('oob','oob64','unaligned','widths'):
+            fault=_run_job([str(exe),'--'+name],10,'pcrecomp-checked-'+name,cfg,max_processes=1,memory_mb=256)
+            result[name]=fault
+            expected = 70 if name.startswith('oob') else 0
+            if fault['timed_out'] or fault['returncode']!=expected: raise WorkSafeError(name+' check failed')
+    return result
+
+def test_checked_dispatch():
+    """Compile and run synthetic fail-closed dispatch tests, no game code."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio'/'18'/'Community'/'VC'/'Tools'/'MSVC'/'14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits'/'10'
+    cl=vs/'bin'/'Hostx64'/'x64'/'cl.exe';sdk='10.0.26100.0'
+    include=[vs/'include',kits/'Include'/sdk/'ucrt',kits/'Include'/sdk/'shared',kits/'Include'/sdk/'um']
+    lib=[vs/'lib'/'x64',kits/'Lib'/sdk/'ucrt'/'x64',kits/'Lib'/sdk/'um'/'x64']
+    if not cl.is_file() or not all(p.is_dir() for p in include+lib): raise WorkSafeError('MSVC toolchain or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,include));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    output=ROOT/'build'/'dispatch-test';output.mkdir(parents=True,exist_ok=True);exe=output/'dispatch-test.exe'
+    argv=[str(cl),'/nologo','/Od','/std:c11','/I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'/I',str(ROOT/'recomp'),'/I',str(ROOT/'runtime'),'/Fo'+str(output/'dispatch-test.obj'),'/Fe'+str(exe),str(ROOT/'tests'/'test_checked_dispatch.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'checked-dispatch-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'tests':None}
+    results={}
+    for name,args,expected in (('success',[],0),('missing-call',['--missing-call'],74),('missing-tail',['--missing-tail'],74),('missing-precise',['--missing-precise'],74),('tick-return-mismatch',['--tick-return-mismatch'],78)):
+        if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM during dispatch test')
+        result=_run_job([str(exe)]+args,10,'checked-dispatch-'+name,cfg,max_processes=1,memory_mb=256)
+        results[name]=result
+        if result['timed_out'] or result['returncode']!=expected:raise WorkSafeError('dispatch test failed: '+name)
+    return {'build':built,'tests':results}
+
+def probe_graphics_x86(modes=False, null_case=False, multi=False):
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    if not all(isinstance(x,bool) for x in (modes,null_case,multi)) or sum((modes,null_case,multi))>1:raise WorkSafeError('invalid graphics reference profile')
+    argv=[sys.executable,str(ROOT/'tools'/'probe_graphics_x86.py')]+(['--multi'] if multi else (['--modes'] if modes else (['--null'] if null_case else [])))
+    label='graphics-multi-x86-reference' if multi else ('graphics-modes-x86-reference' if modes else ('graphics-null-x86-reference' if null_case else 'graphics-x86-reference'))
+    return _run_job(argv,30,label,cfg,max_processes=1,memory_mb=384)
+
+def probe_input_x86():
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
+    return _run_job([sys.executable,str(ROOT/'tools'/'probe_input_x86.py')],30,'input-x86-reference',cfg,max_processes=1,memory_mb=384)
+
+def compare_input_native():
+    """Test the input candidate with synthetic Win32/DirectInput doubles only."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    base=ROOT/'private'/'analysis';folder=base/'candidate_input';thunk=base/'dinput8_thunk'
+    report=json.loads((folder/'report.json').read_text(encoding='utf-8'));adjusted=json.loads((folder/'precise_report.json').read_text(encoding='utf-8'));t_report=json.loads((thunk/'report.json').read_text(encoding='utf-8'))
+    source=(folder/'candidate.c').read_text(encoding='utf-8').removesuffix('\n');adapted=(folder/'candidate_precise.c').read_text(encoding='utf-8').removesuffix('\n');t_source=(thunk/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+    sha=lambda value:hashlib.sha256(value.encode('utf-8')).hexdigest()
+    if report['address']!='0x4c1ba0' or sha(source)!=report['source_sha256'] or adjusted['original_sha256']!=report['source_sha256'] or sha(adapted)!=adjusted['adapted_sha256'] or sha(t_source)!=t_report['source_sha256']:
+        raise WorkSafeError('input candidate source mismatch')
+    prefix='#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_00644098(void);\nvoid sub_0060F110(void);\n'
+    if (folder/'input_precise_unit.c').read_text(encoding='utf-8')!=prefix+adapted+'\n'+t_source+'\n':raise WorkSafeError('input unit differs from verified candidates')
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio'/'18'/'Community'/'VC'/'Tools'/'MSVC'/'14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits'/'10';cl=vs/'bin'/'Hostx64'/'x64'/'cl.exe';sdk='10.0.26100.0'
+    include=[vs/'include',kits/'Include'/sdk/'ucrt',kits/'Include'/sdk/'shared',kits/'Include'/sdk/'um'];lib=[vs/'lib'/'x64',kits/'Lib'/sdk/'ucrt'/'x64',kits/'Lib'/sdk/'um'/'x64']
+    if not cl.is_file() or not all(p.is_dir() for p in include+lib):raise WorkSafeError('MSVC or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,include));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    exe=folder/'input-mock-difftest.exe';argv=[str(cl),'/nologo','/Od','/std:c11','/I',str(folder),'/I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'/I',str(ROOT/'recomp'),'/I',str(ROOT/'runtime'),'/Fo'+str(folder/'input-mock-difftest.obj'),'/Fe'+str(exe),str(ROOT/'tests'/'input_candidate_native.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'input-mock-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'run':None,'compare':None}
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM for input mock test')
+    run=_run_job([str(exe)],30,'input-mock-runtime',cfg,max_processes=1,memory_mb=256)
+    if run['returncode']!=0 or run['timed_out']:return {'build':built,'run':run,'compare':None}
+    compared=_run_job([sys.executable,str(ROOT/'tests'/'compare_input_native.py')],30,'input-mock-compare',cfg,max_processes=1,memory_mb=256)
+    return {'build':built,'run':run,'compare':compared}
+
+def compare_graphics_native(precise=False,modes=False,multi=False):
+    """Test the graphics candidate only with synthetic Direct3D/COM doubles."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if not all(isinstance(x,bool) for x in (precise,modes,multi)) or ((modes or multi) and not precise) or (modes and multi):raise WorkSafeError('invalid comparison profile')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    base=ROOT/'private'/'analysis';sources=[]
+    for name,address in (('candidate_graphics','0x4c0830'),('d3d8_thunk','0x64408c')):
+        folder=base/name;report=json.loads((folder/'report.json').read_text(encoding='utf-8'))
+        source=(folder/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
+        if report['address']!=address or hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['source_sha256']:raise WorkSafeError('unexpected candidate')
+        sources.append(source)
+    folder=base/'candidate_graphics'
+    if precise:
+        report=json.loads((folder/'precise_report.json').read_text(encoding='utf-8'));adapted=(folder/'candidate_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+        if report['original_sha256']!=hashlib.sha256(sources[0].encode('utf-8')).hexdigest() or report['adapted_sha256']!=hashlib.sha256(adapted.encode('utf-8')).hexdigest():raise WorkSafeError('precise source mismatch')
+        sources[0]=adapted
+    expected='#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_0064408C(void);\n'+'\n'.join(sources)+'\n'
+    if (folder/('graphics_precise_unit.c' if precise else 'graphics_checked_unit.c')).read_text(encoding='utf-8')!=expected:raise WorkSafeError('unit differs from verified candidates')
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio'/'18'/'Community'/'VC'/'Tools'/'MSVC'/'14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits'/'10';cl=vs/'bin'/'Hostx64'/'x64'/'cl.exe';sdk='10.0.26100.0'
+    include=[vs/'include',kits/'Include'/sdk/'ucrt',kits/'Include'/sdk/'shared',kits/'Include'/sdk/'um'];lib=[vs/'lib'/'x64',kits/'Lib'/sdk/'ucrt'/'x64',kits/'Lib'/sdk/'um'/'x64']
+    if not cl.is_file() or not all(p.is_dir() for p in include+lib):raise WorkSafeError('MSVC or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,include));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    label=('precise-multi' if multi else ('precise-modes' if modes else 'precise')) if precise else 'mock';exe=folder/(label+'-difftest.exe');argv=[str(cl),'/nologo','/Od','/std:c11','/I',str(folder),'/I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'/I',str(ROOT/'recomp'),'/I',str(ROOT/'runtime')]
+    if precise:argv.append('/DMH_PRECISE_RETURN')
+    argv+=['/Fo'+str(folder/(label+'-difftest.obj')),'/Fe'+str(exe),str(ROOT/'tests'/'graphics_candidate_native.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'graphics-'+label+'-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:return {'build':built,'run':None,'compare':None}
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM for graphics mock test')
+    run=_run_job([str(exe)]+(['--multi'] if multi else (['--modes'] if modes else [])),30,'graphics-'+label+'-runtime',cfg,max_processes=1,memory_mb=256)
+    if run['returncode']!=0 or run['timed_out']:return {'build':built,'run':run,'compare':None}
+    compared=_run_job([sys.executable,str(ROOT/'tests'/'compare_graphics_native.py')]+(['--precise-multi' if multi else ('--precise-modes' if modes else '--precise')] if precise else []),30,'graphics-'+label+'-compare',cfg,max_processes=1,memory_mb=256)
+    return {'build':built,'run':run,'compare':compared}
+
+def test_graphics_null_failure():
+    """Confirm synthetic null creation fails in both x86 and checked code."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    ref=probe_graphics_x86(null_case=True)
+    if ref['returncode']!=0 or ref['timed_out']:return {'reference':ref,'control':None,'fault':None}
+    control=compare_graphics_native(precise=True)
+    if not control['compare'] or control['compare']['returncode']!=0 or control['compare']['timed_out']:
+        return {'reference':ref,'control':control,'fault':None}
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM for null fault test')
+    exe=ROOT/'private/analysis/candidate_graphics/precise-difftest.exe'
+    fault=_run_job([str(exe),'--null'],10,'graphics-null-checked',cfg,max_processes=1,memory_mb=256)
+    if fault['timed_out'] or fault['returncode']!=70:raise WorkSafeError('null read was not rejected at guest address zero')
+    return {'reference':ref,'control':control,'fault':fault}
+
+def run(argv, *, timeout=None, log_name=None, _profile='test'):
+    if os.name != 'nt': raise WorkSafeError('Windows Job Objects required')
+    cfg = json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if not argv or not all(isinstance(x, str) for x in argv): raise WorkSafeError('argv required')
+    exe = Path(argv[0]).name.lower()
+    if _profile not in ('test', 'tree_test'):
+        raise WorkSafeError('unknown profile')
+    if exe not in {'python.exe', 'pythonw.exe'} or len(argv) < 2 or Path(argv[1]).resolve() != (ROOT/'tests'/'test_child.py').resolve():
+        raise WorkSafeError('command not on the audited headless allowlist')
+    seconds = cfg['timeout_seconds'] if timeout is None else timeout
+    if not 0 < seconds <= cfg['timeout_seconds']: raise WorkSafeError('invalid timeout')
+    return _run_job(argv, seconds, log_name, cfg, max_processes=2 if _profile == 'tree_test' else 1, memory_mb=cfg['memory_limit_mb'])
+
+def _run_job(argv, seconds, log_name, cfg, *, max_processes, memory_mb, env=None, input_bytes=None):
+    if input_bytes is not None and (not isinstance(input_bytes,bytes) or len(input_bytes)>2*1024*1024):
+        raise WorkSafeError('invalid bounded stdin')
+    k = c.WinDLL('kernel32', use_last_error=True)
+    class BASIC(c.Structure):
+        _fields_ = [('PerProcessUserTimeLimit',c.c_longlong),('PerJobUserTimeLimit',c.c_longlong),('LimitFlags',w.DWORD),('MinimumWorkingSetSize',c.c_size_t),('MaximumWorkingSetSize',c.c_size_t),('ActiveProcessLimit',w.DWORD),('Affinity',c.c_size_t),('PriorityClass',w.DWORD),('SchedulingClass',w.DWORD)]
+    class IO(c.Structure):
+        _fields_ = [(x,c.c_ulonglong) for x in ('ReadOperationCount','WriteOperationCount','OtherOperationCount','ReadTransferCount','WriteTransferCount','OtherTransferCount')]
+    class EXT(c.Structure):
+        _fields_ = [('BasicLimitInformation',BASIC),('IoInfo',IO),('ProcessMemoryLimit',c.c_size_t),('JobMemoryLimit',c.c_size_t),('PeakProcessMemoryUsed',c.c_size_t),('PeakJobMemoryUsed',c.c_size_t)]
+    k.CreateJobObjectW.argtypes=[c.c_void_p,w.LPCWSTR]; k.CreateJobObjectW.restype=w.HANDLE
+    k.SetInformationJobObject.argtypes=[w.HANDLE,c.c_int,c.c_void_p,w.DWORD]; k.SetInformationJobObject.restype=w.BOOL
+    k.AssignProcessToJobObject.argtypes=[w.HANDLE,w.HANDLE]; k.AssignProcessToJobObject.restype=w.BOOL
+    k.CloseHandle.argtypes=[w.HANDLE]; k.CloseHandle.restype=w.BOOL
+    nt=c.WinDLL('ntdll'); nt.NtResumeProcess.argtypes=[w.HANDLE]; nt.NtResumeProcess.restype=c.c_long
+    job=k.CreateJobObjectW(None,None)
+    if not job: raise c.WinError(c.get_last_error())
+    proc=None
+    try:
+        limits=EXT(); b=limits.BasicLimitInformation
+        b.LimitFlags=0x2000|0x8|0x200|0x10|0x20 # kill on close, process count, job memory, affinity, priority
+        b.ActiveProcessLimit=max_processes
+        b.PriorityClass=0x4000
+        # Select from current process affinity, never assume CPU numbering starts at zero.
+        process_mask=c.c_size_t(); system_mask=c.c_size_t()
+        k.GetCurrentProcess.restype=w.HANDLE
+        k.GetProcessAffinityMask.argtypes=[w.HANDLE,c.POINTER(c.c_size_t),c.POINTER(c.c_size_t)]
+        if not k.GetProcessAffinityMask(k.GetCurrentProcess(),c.byref(process_mask),c.byref(system_mask)): raise c.WinError(c.get_last_error())
+        available=[i for i in range(c.sizeof(c.c_size_t)*8) if process_mask.value & (1<<i)]
+        count=max(1,min(int(cfg['max_jobs']), int(len(available)*float(cfg['cpu_fraction']))))
+        b.Affinity=sum(1<<i for i in available[:count]); limits.JobMemoryLimit=int(memory_mb)*1024*1024
+        if not k.SetInformationJobObject(job,9,c.byref(limits),c.sizeof(limits)): raise c.WinError(c.get_last_error())
+        logs=ROOT/'logs'; logs.mkdir(exist_ok=True)
+        name=log_name or uuid.uuid4().hex
+        if Path(name).name != name: raise WorkSafeError('invalid log name')
+        with (logs/(name+'.stdout.log')).open('wb') as out, (logs/(name+'.stderr.log')).open('wb') as err:
+            # Suspended until the job has been assigned, so limits apply before user code.
+            proc=subprocess.Popen(argv, stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL, stdout=out, stderr=err, shell=False, env=env, creationflags=0x08000000|0x00004000|0x00000004)
+            if not k.AssignProcessToJobObject(job,w.HANDLE(int(proc._handle))): raise c.WinError(c.get_last_error())
+            if nt.NtResumeProcess(w.HANDLE(int(proc._handle))) != 0: raise WorkSafeError('cannot resume child')
+            try:
+                if input_bytes is None: code=proc.wait(timeout=seconds)
+                else: proc.communicate(input=input_bytes,timeout=seconds);code=proc.returncode
+                timed_out=False
+            except subprocess.TimeoutExpired:
+                k.CloseHandle(job); job=None # kill-on-close applies to only our job
+                proc.wait(); code=proc.returncode; timed_out=True
+        return {'returncode':code,'timed_out':timed_out,'log':str(logs/name),'cpu_count':count}
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill(); proc.wait()
+        if proc is not None and proc.stdin is not None and not proc.stdin.closed:proc.stdin.close()
+        if job: k.CloseHandle(job)

@@ -1,0 +1,89 @@
+# Estado técnico
+
+Avance posterior: una prueba aislada de la rama de argumento cero de la dependencia indirecta coincidió en 12 casos adicionales frente a Unicorn, con dos métodos virtuales simulados. El objeto ARM64 combinado sigue sin ejecutarse en Android y las implementaciones virtuales reales están pendientes.
+
+Avance posterior: se comprobaron dos fallos adicionales de la ruta virtual de la candidata: objeto nulo y destino ausente. Los accesos fueron detenidos o rechazados en los puntos esperados, con la salvedad de que el despacho no reproduce todo el estado de excepción x86. Se mantienen las 256 comparaciones observadas y el objeto combinado sigue sin ejecutarse en Android.
+
+Avance posterior: una sexta dependencia con llamadas indirectas se incorporó a la comparación aislada. Coincidieron 256 combinaciones frente a Unicorn con tabla virtual y dependencias externas simuladas. El objeto ARM64 combinado define siete símbolos y deja 28 externos; no se ha ejecutado en Android ni integrado en el juego. Los párrafos inferiores sobre la falta de comparación de esa dependencia describen el estado anterior.
+
+Avance posterior: se tradujo una dependencia adicional de 37 instrucciones con llamadas indirectas. Su variante con seis retornos validados y adaptadores comprobados compiló por separado para ARM64; contiene 21 símbolos externos pendientes. No se ha enlazado a la candidata principal ni ejecutado. La comparación previa de 64 casos sigue cubriendo cinco dependencias reales y el resto simuladas.
+
+Avance posterior: se tradujo una quinta dependencia pequeña y la comparación aislada volvió a coincidir en 64 casos con cinco dependencias reales y el resto simuladas. El objeto ARM64 define seis símbolos y deja 26 externos; sigue sin ejecutarse en Android ni integrarse en el juego. Otra dependencia nueva contiene una llamada indirecta y permanece pendiente.
+
+Avance posterior: se añadió una cuarta dependencia traducida de la candidata de tiempo, con copia de estructura y dos llamadas adicionales. Los 64 casos aislados volvieron a coincidir con cuatro dependencias reales y el resto simuladas. El objeto ARM64 combinado define cinco símbolos y mantiene 27 externos; no se ha ejecutado en Android ni integrado en la APK.
+
+Último avance: tres dependencias pequeñas de la candidata de tiempo se tradujeron y compilaron junto con ella en un objeto ARM64 privado; quedan 26 símbolos externos. La comparación aislada de 64 casos volvió a pasar con esas tres rutinas reales y el resto de dependencias simuladas. También se observaron los fallos controlados por objeto nulo y temporizador ausente, con la diferencia de pila descrita en `analysis/timer_candidates.md`. El juego sigue sin arrancar.
+
+Pruebas de fallo de la candidata de tiempo: en el PC, un objeto nulo produjo una lectura no mapeada en la referencia x86 y un fallo comprobado en la misma dirección; un temporizador ausente produjo un salto a cero en la referencia y fue rechazado por el despacho. El segundo fallo ocurre antes de apilar el retorno y no reproduce todo el estado x86. Las pruebas son aisladas y con dependencias simuladas.
+
+Comparación acotada: la candidata de tiempo x86 aislada y su C traducido para Windows x64 coincidieron en 64 casos sintéticos, con ambas salidas principales y cuatro alineaciones de pila. Se usaron sustitutos para todas las dependencias y se compararon los registros, banderas aritméticas y regiones de memoria observadas. No se ejecutó el juego completo ni se ha ejecutado esta candidata en ARM64; no se demuestra equivalencia general. Ver `analysis/timer_candidates.md`.
+
+Nueva variante: la candidata de tiempo compiló para ARM64 con accesos y despacho comprobados y once direcciones de retorno estáticamente validadas; conserva 29 símbolos externos sin resolver. Un arnés sintético que reproduce la entrada IAT y dos retornos de esa candidata pasó en Windows y S25, sin ejecutar la función real. Ver `analysis/timer_candidates.md`.
+
+Avance de análisis: se identificaron dos referencias candidatas a `GetTickCount`, pero su secuencia contiene una llamada fuera de la sección de código habitual y no se ha conectado. Otra candidata, `0x6081a0`, contiene dos referencias a `timeGetTime`; PCRecomp la tradujo y compiló a objeto ARM64 privado, con 27 símbolos externos pendientes. No se ha ejecutado ni se ha probado su alcanzabilidad. Ver `analysis/timer_candidates.md`.
+
+Nuevo avance: `runtime/tick_dispatch.c` conecta el modelo de retorno de reloj con un despachador experimental mediante un reloj y una política de direcciones de retorno proporcionados por el llamador. Un arnés sintético que usa el despacho comprobado de PCRecomp pasó en Windows y en el S25, también con `CLOCK_BOOTTIME` real; se rechazó un retorno no autorizado. No se ha registrado esta función para el ejecutable ni se ha probado un sitio de llamada real del juego. El juego sigue sin arrancar.
+
+Actualización posterior: el perfil ampliado de reloj, retorno x86 y registro pasó en el S25. La prueba combinó el proveedor Android real con pila y registros invitados sintéticos; se comprobó el hash y se confirmó limpieza. La conexión con PCRecomp y la ejecución del juego siguen pendientes.
+
+Actualización: el modelo del retorno x86 de `GetTickCount` y su llamada con reloj sustituible pasaron pruebas sintéticas en WebAssembly, incluidos errores de pila, reloj fallido y solapamiento de salidas. Se preparó una prueba que combina el modelo con el reloj Android real; el intento en el S25 se detuvo antes de compilar por RAM libre menor de 1536 MiB. Este modelo no está conectado al despacho de PCRecomp, no ha ejecutado código del juego y no constituye una implementación completa de la API.
+
+Trabajo adicional sin verificar: `runtime/win_tick_x86.c` modela la devolución de un contador por EAX y el consumo de la dirección de retorno invitada desde la pila. Se añadieron casos para retorno válido, pila fuera de rango y desbordamiento, pero la prueba ampliada no pudo arrancar por RAM libre inferior a 1024 MiB. No se ha conectado al dispatcher ni al código recompilado. Ejecutar `test_import_registry()` y `test_import_registry_on_s25()` antes de considerarlo validado.
+
+Actualización posterior: el proveedor `CLOCK_BOOTTIME` compiló para ARM64 y pasó una prueba en el S25 junto con el registro y el PE sintético. La prueba comprueba lecturas sucesivas, conversión y desbordamiento; no demuestra equivalencia exacta con Windows, no incorpora un thunk x86 y no habilita el juego. SHA-256 y detalles en `docs/evidence/S25_BOOT_CLOCK.md`.
+
+Trabajo en curso: se implementó un auxiliar para convertir tiempo de arranque en milisegundos de 32 bits con desbordamiento, y un proveedor Android mediante `CLOCK_BOOTTIME`, como base para una futura implementación de `GetTickCount`. La conversión pasó pruebas sintéticas WebAssembly, incluidos desbordamiento y entradas inválidas. El proveedor Android todavía no se ha compilado ni ejecutado en el teléfono: el perfil ampliado se detuvo por RAM insuficiente. No existe aún el thunk x86 ni está conectado al juego.
+
+Actualización posterior: el perfil ampliado pasó también en el S25 con la integración de registro y PE sintético; se verificó el hash y se confirmó la limpieza. Las notas anteriores que indican que esa prueba seguía pendiente corresponden al intento previo.
+
+Actualización: las pruebas sintéticas del registro de importaciones pasaron en WebAssembly y ARM64 en el S25; el binario ARM64 se comprobó por SHA-256 y se confirmó su limpieza. La integración del registro con el plan IAT pasó en WebAssembly. Se amplió el perfil de Android para incluir esa integración PE, pero el primer intento no llegó a compilar por RAM libre inferior a 1536 MiB; la integración PE en ARM64 sigue pendiente. No se han implementado funciones reales de Windows ni arranca el juego.
+
+Se añadió además una prueba de integración sintética entre el registro de importaciones y el plan de IAT: comprueba rechazo con una importación sin resolver y aplicación con ambas resueltas. Está preparada en el perfil WASM de `test_pe_image_wasm()`, pero el intento posterior no arrancó por RAM insuficiente. No dar por verificada esa integración hasta que pase la prueba.
+
+Actualización: el registro experimental de importaciones compiló y sus pruebas sintéticas pasaron en WebAssembly. Se preparó `test_import_registry_on_s25()` para compilar y ejecutar las mismas pruebas como ARM64 en el dispositivo, verificando SHA-256 y limpiando su directorio temporal. El primer intento se detuvo antes de compilar debido a RAM libre inferior al mínimo de 1536 MiB; no se ejecutó en el S25. Este registro no implementa ni conecta funciones reales del juego.
+
+Trabajo en curso: se añadieron `runtime/import_registry.c` y su cabecera como registro experimental para asociar nombres u ordinales de importación a direcciones invitadas, con rechazo de duplicados y faltantes. Se prepararon pruebas sintéticas, pero **aún no se han compilado ni ejecutado**: el supervisor rechazó el intento al caer la RAM disponible por debajo de 1024 MiB. El registro no está integrado en la APK ni implementa ninguna API de Windows. Cuando haya memoria disponible, ejecutar `python -c "import scripts.worksafe as w; print(w.test_import_registry())"` y revisar sus registros antes de usarlo.
+
+Actualización posterior: el usuario seleccionó la carpeta en el S25 y el diagnóstico mostró que se identificó el ejecutable y se inspeccionaron la estructura PE y las importaciones; también mostró la comprobación básica de memoria nativa correcta. Se observaron estos mensajes en la actividad mediante accesibilidad. Esto valida ese recorrido en el dispositivo, no la ejecución del juego.
+
+Actualización del 2026-11-13: se compiló una APK privada de diagnóstico mediante AAPT2, D8 y firma de depuración, con recursos, icono, launcher y biblioteca ARM64. Se instaló en el Galaxy S25 Ultra sin reemplazar otro paquete y Android informó de arranque correcto y proceso activo. No se ha comprobado aún la selección de carpeta ni la salida visual del diagnóstico JNI en el teléfono. La APK no ejecuta el juego y el botón Jugar está desactivado. Esta ruta manual no valida la compilación Gradle.
+
+La prueba sintética ARM64 de despacho pasó en el S25 y confirmó la limpieza de su directorio temporal. Se copió la instalación local a `/sdcard/mh-androidevolved`, con comprobaciones de cantidad, tamaño total y hash del ejecutable; ver `docs/evidence/S25_GAME_COPY_AND_ICON.md`. El resto de los archivos no se verificó individualmente.
+
+2026-11-13. Proyecto en fase inicial; no es jugable. No existe recompilación completa del juego, runtime integrado, renderer, HUD funcional ni APK. La instalación local se trata como solo lectura. PCRecomp desensambló una ventana del punto de entrada y tradujo un candidato heurístico de 19 instrucciones a C; ese código compiló a objeto ARM64 de forma aislada, sin enlazar ni ejecutar. Ver `recomp/README.md`.
+
+El supervisor pasa 16 pruebas, que incluyen prioridad, afinidad, rechazo de comandos, plazos, terminación de descendientes, rechazo bajo presión de memoria y controles ADB simulados. Gradle offline no se ha ejecutado por falta de RAM libre; su árbol real sigue sin comprobarse. El launcher Java se compiló aisladamente con javac contra Android 35. El módulo de memoria invitada pasó pruebas sintéticas en WebAssembly y en el S25 ARM64.
+
+Un segundo candidato x86 se tradujo y compiló como objeto ARM64. Una comparación limitada en 167 casos sintéticos concordó en salida, registros generales, regiones de memoria observadas y seis flags aritméticos entre Unicorn y el C compilado tanto a WebAssembly con macros de prueba como a Windows x64 con el encabezado real de PCRecomp. Otros flags y memoria, integración del runtime, ejecución ARM64 y cobertura de juego siguen pendientes.
+
+Un adaptador de memoria comprobada para ese candidato pasó 653 casos en Windows x64 con cuatro alineaciones y rechazó accesos fuera de límites. El candidato con adaptador compiló como objeto ARM64; no se ha enlazado ni ejecutado en ARM64. El adaptador solo cubre un subconjunto de accesos y su manejo desalineado no se ha ejecutado en ARM64.
+
+Un tercer candidato con x87 se tradujo y compiló a ARM64, también en una variante con tres lecturas flotantes adaptadas a memoria comprobada. En Windows x64 esa variante coincidió con Unicorn en 653 casos finitos y 288 especiales para los estados observados; el estado completo de la FPU, excepciones y Android siguen pendientes.
+
+El barrido estático de `.text` registró 343 referencias candidatas a importaciones y 93 posibles llamadas a trampolines. Los límites de instrucción y la alcanzabilidad aún no se han verificado; ver `analysis/import_reference_candidates.md`.
+
+Un candidato de 84 instrucciones que llama al trampolín `Direct3DCreate8` y el propio trampolín se tradujeron y enlazaron en un objeto ARM64 reubicable. Quedan 18 símbolos externos y varias llamadas indirectas; no se han ejecutado ni producido gráficos. Ver `analysis/graphics_candidate.md`.
+
+El despacho indirecto comprobado pasó pruebas sintéticas de destinos resueltos y ausentes en Windows x64. Una variante del objeto gráfico se compiló con memoria y despacho comprobados; mantiene 20 símbolos externos y tampoco se ha ejecutado.
+
+Tres casos sintéticos de la ruta gráfica se compararon sin Direct3D real. Se detectaron dos diferencias de pila por direcciones de retorno ficticias; una adaptación específica de cinco llamadas eliminó esas diferencias en los casos probados y compiló a ARM64. Siguen pendientes las rutas restantes, el retorno indirecto general y la ejecución en dispositivo.
+
+Otros nueve casos sintéticos ejercitan la enumeración de un modo con tres profundidades y tres frecuencias. La variante adaptada coincidió con Unicorn en registros, flags aritméticos y pila observada; no se ejecutó Direct3D real.
+
+Se añadieron 12 casos con dos modos simulados y una prueba de creación nula. En los primeros coincidieron los estados observados; en la última Unicorn detectó una lectura no mapeada de dirección cero y el adaptador detuvo el mismo acceso en la región sintética. No se ha implementado manejo general de excepciones del juego.
+
+Un candidato de 28 instrucciones relacionado con DirectInput y su trampolín se tradujeron y enlazaron como objeto ARM64 reubicable. Persisten 17 símbolos externos; no se ha implementado ni probado entrada del juego. Ver `analysis/input_candidate.md`.
+
+Una variante de ese candidato con memoria y despacho comprobados, y tres direcciones de retorno precisas, compiló a ARM64. En Windows x64 coincidió con Unicorn en registros, flags aritméticos, pila y configuración para tres casos sintéticos: éxito, fallo y estado ya inicializado. Las API de entrada reales y la ejecución de ese candidato en ARM64 siguen pendientes.
+
+Dos ejecutables ARM64 con pruebas sintéticas de memoria y PE32 pasaron en un Galaxy S25 Ultra `SM-S938B`, con hashes comprobados y limpieza temporal confirmada. No incluyen el juego ni prueban gameplay; ver `docs/evidence/S25_ARM64_SYNTHETIC_TESTS.md`.
+
+Una tercera prueba sintética ARM64 de despacho compiló y pasó la verificación de formato. Un intento en el S25 falló por un reinicio de ADB antes de ejecutarse; una inspección posterior no encontró directorios temporales del proyecto. Se preparó una variante de una sola sesión y se probó con ADB simulado, pero su ejecución real sigue pendiente por memoria insuficiente en el PC.
+
+Assets: 162 PNG y SVG generados y validados automáticamente; acciones sin verificar. Android: proyecto inicial con selección de carpeta, comparación SHA-256 de una versión inventariada y vista previa de recursos. El proyecto completo no se ha compilado ni probado en un dispositivo. Ver `docs/ANDROID_BUILD.md` y `docs/TOUCH_HUD_DESIGN.md`.
+
+El launcher incluye un diagnóstico JNI de memoria. El Java compiló de forma aislada y la biblioteca JNI ARM64 se construyó con Clang y con el CMake del proyecto, comprobando el símbolo exportado. La biblioteca y el launcher no se han ejecutado en Android; no hay APK.
+
+Un cargador PE32 de solo mapeo pasó pruebas sintéticas en WebAssembly y mapeó en memoria las 15 secciones del ejecutable local; el resultado coincidió con una copia independiente y el hash del archivo no cambió. El launcher incluye una llamada JNI a este análisis tras identificar la versión. Las funciones JNI pasaron pruebas con una tabla simulada en Windows x64, pero el flujo no se ha ejecutado en un dispositivo Android.
+
+La enumeración de importaciones coincidió con una lectura independiente de las 165 entradas del ejecutable. El plan de IAT sin resolutores las marca como pendientes y no escribe la imagen; las pruebas sintéticas verifican rechazo ante faltantes, cambios y solapamientos. No se ha implementado ninguna de esas API como consecuencia de este trabajo.

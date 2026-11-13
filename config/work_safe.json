@@ -1,0 +1,1 @@
+{"enabled": true, "max_jobs": 4, "cpu_fraction": 0.25, "timeout_seconds": 60, "memory_limit_mb": 512, "max_processes": 1, "build_timeout_seconds": 600, "build_job_memory_mb": 1536, "build_max_processes": 8, "build_min_free_memory_mb": 4096}

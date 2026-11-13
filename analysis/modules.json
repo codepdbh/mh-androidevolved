@@ -1,0 +1,22 @@
+[
+  {
+    "path": "binkw32.dll",
+    "sha256": "ddd2c828cd81118d188733de8858ef7d858c583603ffcf934422572da2b6ce99",
+    "machine": "0x14c"
+  },
+  {
+    "path": "dinput8.dll",
+    "sha256": "4cd7adfa4898d80cc6e4f4645066d8157e9bad1bf18950f6f4798abdce20bf56",
+    "machine": "0x14c"
+  },
+  {
+    "path": "manhunt.exe",
+    "sha256": "5001b64f77690316330575fcfe6acd5c5115c5476c183ffec0d86779b0686b52",
+    "machine": "0x14c"
+  },
+  {
+    "path": "mss32.dll",
+    "sha256": "06f26eaa14f78e819e104e5c3af610dc11cbe45a69a40fb6c9750db15ec4d615",
+    "machine": "0x14c"
+  }
+]

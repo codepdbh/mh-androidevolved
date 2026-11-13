@@ -1,0 +1,7 @@
+# Análisis estático inicial del punto de entrada
+
+Se utilizó PCRecomp en la revisión indicada en `recomp/README.md`, bajo el supervisor, sobre el ejecutable cuyo hash figura en `analysis/binary_versions.json`. La lectura se limitó a 128 bytes desde el punto de entrada VA `0x851370`; se obtuvieron 36 instrucciones de desensamblado lineal y se guardaron exclusivamente en `private/analysis/entrypoint.json`. Un desensamblado lineal incluye bytes que pueden no ser alcanzables como instrucciones; no demuestra flujo real ni identifica funciones.
+
+El punto de entrada está en una sección ejecutable y escribible llamada `.prus`, y la secuencia incluye una transferencia al interior de una instrucción y operaciones sobre memoria. Esto es indicio de código no convencional o empaquetado, no una identificación concluyente de protección o DRM. No se ha ejecutado el PE, desempaquetado, eludido protección ni tratado el resultado como código de gameplay. Es necesario investigar la procedencia y el formato mediante análisis estático sin mecanismos de evasión.
+
+El análisis completo de funciones de PCRecomp puede consumir varias horas y gigabytes según su propio código; no se ha lanzado en este equipo bajo presión de memoria. Una búsqueda limitada en `.text` identificó un candidato con prólogo y retorno que se tradujo y compiló como objeto ARM64 privado. No se conoce su alcanzabilidad ni se ha demostrado equivalencia. Ver `recomp/README.md`. Se debe continuar identificando funciones originales sin sortear protección.

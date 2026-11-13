@@ -1,0 +1,18 @@
+/Manhunt Collection/
+/private/
+/build/
+/logs/
+__pycache__/
+*.pyc
+# Icono derivado de una referencia aportada por el propietario: solo local.
+/design/app_icon/manhunt-android-evolved.png
+/android/app/src/main/res/drawable-nodpi/app_icon_art.png
+# Artefactos locales
+*.apk
+*.so
+*.o
+*.obj
+*.exe
+*.wasm
+.gradle/
+local.properties
