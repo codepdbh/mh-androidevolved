@@ -1,5 +1,7 @@
 # Problemas conocidos
 
+- Bloqueo actual: el S25 no aparece en `adb devices`, por lo que la candidata de tiempo con el caso NaN y las comprobaciones `--x87-semantics` no se han ejecutado en ARM64. Al reconectarlo: `python -c "import scripts.worksafe as w; w.build_time_candidate_arm64_test(); print(w.run_time_candidate_on_s25())"`. Mitigación preparada (sin verificar en ARM64): `recomp/x87_semantics.h` para el NaN indefinido.
+
 - PCRecomp traduce `fdivp` con una protección que devuelve el dividendo si el divisor es cero; x87 produce ±inf o NaN. Se corrigió solo en `0x5daa50`; cualquier otra traducción con `fdivp` necesita la misma revisión. La FPU se modela con `double` del host, no con precisión extendida de 80 bits ni el control de precisión que Direct3D suele fijar. Hipótesis sin verificar: un `0/0` produce en x87 el NaN indefinido negativo (`0xffc00000`) y en ARM64 el NaN por defecto positivo (`0x7fc00000`); las pruebas actuales no generan NaN.
 
 Actualización posterior: la selección de carpeta y las llamadas JNI de diagnóstico completaron en el S25. No se ha probado la ejecución del juego y los datos ajenos al ejecutable no se han verificado individualmente.

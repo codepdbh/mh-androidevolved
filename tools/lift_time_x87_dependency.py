@@ -2,9 +2,10 @@
 
 Two audited rewrites are applied to the generated code:
 - the five `*(float*)ADDR(x)` accesses become bounds-checked `MEMF(x)`;
-- PCRecomp's `fdivp` guard (returns st(1) unchanged on a zero divisor) becomes
-  a plain IEEE division, which is what x87 does with masked exceptions
-  (+-inf or NaN).
+- PCRecomp's `fdivp` guard (returns st(1) unchanged on a zero divisor) is
+  removed, and every x87 arithmetic operation goes through the helpers in
+  recomp/x87_semantics.h: IEEE results (+-inf on a zero divisor) with the x87
+  real indefinite NaN for invalid operations, as with masked exceptions.
 Calls to 0x5db0d0 and 0x482f20 stay unresolved; 0x5ea2b0 is translated.
 """
 import hashlib,json,re,sys
@@ -21,7 +22,8 @@ SPECS={
 SITES={0x5daa93:0x5db0d0,0x5daa99:0x5ea2b0,0x5daaa3:0x482f20}
 ALLOWED={'MEM32','MEMF','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}
 FDIVP_GUARD='{ double _v = fp_pop(); _st[0] = _v == 0.0 ? _st[0] : _st[0] / _v; }'
-FDIVP_IEEE='{ double _v = fp_pop(); _st[0] = _st[0] / _v; }'
+FDIVP_IEEE='{ double _v = fp_pop(); _st[0] = mh_x87_div(_st[0], _v); }'
+X87_OPS={'*':'mh_x87_mul','/':'mh_x87_div','-':'mh_x87_sub','+':'mh_x87_add'}
 def main():
     data=GAME.read_bytes()
     if hashlib.sha256(data).hexdigest()!=EXPECTED:raise SystemExit('unexpected executable hash')
@@ -52,11 +54,14 @@ def main():
             if n!=5:raise SystemExit('unexpected float access count')
             if source.count(FDIVP_GUARD)!=1:raise SystemExit('unexpected fdivp form')
             source=source.replace(FDIVP_GUARD,FDIVP_IEEE)
+            source,n=re.subn(r'_st\[0\] ([*/+-])= \(double\)MEMF\((0x[0-9A-F]+)\);',lambda m:f'_st[0] = {X87_OPS[m.group(1)]}(_st[0], (double)MEMF({m.group(2)}));',source)
+            if n!=3:raise SystemExit('unexpected x87 memory operation count')
+            if re.search(r'_st\[\d\]\s*[*/+-]=|_st\[0\] / _v',source):raise SystemExit('x87 arithmetic left without helper')
             for site,target in SITES.items():
                 pattern=rf'RECOMP_CALL\(sub_{target:08X}\); /\* 0x{site:08X}: call 0x{target:x} \*/'
                 source,n=re.subn(pattern,f'MH_RECOMP_CALL_AT(sub_{target:08X}, 0x{site+5:08X}u);',source)
                 if n!=1:raise SystemExit('call replacement mismatch')
-            header='void sub_005DB0D0(void);\nvoid sub_005EA2B0(void);\nvoid sub_00482F20(void);\n'
+            header='#include "x87_semantics.h"\nvoid sub_005DB0D0(void);\nvoid sub_005EA2B0(void);\nvoid sub_00482F20(void);\n'
         if 'ADDR(' in source:raise SystemExit(f'raw guest pointer left at {address:#x}')
         helpers=set(re.findall(r'\b(recomp_\w+)\s*\(',source))
         if helpers:raise SystemExit(f'unchecked runtime helpers at {address:#x}: '+','.join(sorted(helpers)))
@@ -68,7 +73,7 @@ def main():
                       'bytes_length':len(extents[address]),'lifted_sha256':lifted,'adapted_sha256':hashlib.sha256(text.encode()).hexdigest(),'operations':sorted(operations)})
     (out/'x87_report.json').write_text(json.dumps({'input_sha256':EXPECTED,'items':items,
         'sites':[{'call':hex(a),'return':hex(a+5)} for a in sorted(SITES)],
-        'rewrites':['5 float accesses to MEMF','fdivp zero guard replaced by IEEE division'],
+        'rewrites':['5 float accesses to MEMF','fdivp zero guard removed','4 x87 operations through x87_semantics.h helpers'],
         'limitations':['x87 modelled with host double, not 80-bit extended; precision control not modelled',
                        'FPU status and exception flags not modelled','reachability unproved','not integrated into game']},indent=2)+'\n',encoding='utf-8')
     print('translated 0x5daa50 and 0x5ea2b0; sources remain private')

@@ -516,6 +516,7 @@ def _time_device_script(remote,digest,encoded):
         'echo MHAE_BEGIN_ZERO\n"$p" --virtual-zero; rc=$?\necho MHAE_END_ZERO\n'
         'if [ "$rc" -ne 0 ]; then echo MHAE_ZERO_FAILED; exit 87; fi\n'
         +''.join(f'"$p" --{mode} >/dev/null; rc=$?\nif [ "$rc" -ne {code} ]; then echo MHAE_FAULT_MISMATCH_{mode.replace("-","_")}=$rc; exit 88; fi\n' for mode,code in faults)+
+        '"$p" --x87-semantics; rc=$?\nif [ "$rc" -ne 0 ]; then echo MHAE_X87_SEMANTICS_FAILED; exit 89; fi\n'
         'echo MHAE_TESTS_PASSED\nexit 0\n').encode('ascii')
 
 def _split_time_device_output(output):
@@ -1504,6 +1505,21 @@ def test_checked_rep_movs():
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('rep movs test build failed; inspect rep-movs-build logs')
     ran=_run_job([str(exe)],30,'rep-movs-run',cfg,max_processes=1,memory_mb=256)
     if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('rep movs test failed with code '+str(ran['returncode']))
+    return {'build':built,'run':ran}
+
+def test_x87_semantics():
+    """Compile and run synthetic checks of the x87 arithmetic helpers on the host; no game code."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    cl,env=_msvc_env()
+    output=ROOT/'build'/'x87-semantics-test';output.mkdir(parents=True,exist_ok=True);exe=output/'x87-semantics-test.exe'
+    argv=[str(cl),'/nologo','/Od','/std:c11','/W4','/I',str(ROOT/'recomp'),'/Fo'+str(output)+'\\','/Fe'+str(exe),
+          str(ROOT/'tests'/'test_x87_semantics.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'x87-semantics-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('x87 semantics build failed; inspect x87-semantics-build logs')
+    ran=_run_job([str(exe)],30,'x87-semantics-run',cfg,max_processes=1,memory_mb=256)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('x87 semantics test failed with code '+str(ran['returncode']))
     return {'build':built,'run':ran}
 
 def probe_graphics_x86(modes=False, null_case=False, multi=False):

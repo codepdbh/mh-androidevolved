@@ -48,3 +48,7 @@ Se tradujeron `0x5daa50` y `0x5ea2b0` con dos reescrituras auditadas: cinco acce
 - SHA-256 del binario ARM64: `7ee1d5cceb0a7131c533f143dcab798b7e8d8044d8b8002602243de242892056`.
 - Resultado en el S25 `SM-S938B`: 256 + 12 casos coinciden con Unicorn, incluidos `-inf` en ambas divisiones; fallos 70 / 74 / 75 / 71; limpieza confirmada. Windows x64 también coincidió.
 - Límites: no se generó ningún NaN; no se modelan la precisión extendida, los flags de estado ni las excepciones x87.
+
+## Pendiente: caso NaN
+
+El modo 3 usa ahora `inf/inf` en la primera división; Unicorn produce `0xffc00000`. La traducción pasa por `recomp/x87_semantics.h`. Windows x64 coincidió (256 + 12 casos). El binario ARM64 `6bc7b140c2eb9991fb8f33d47ed9aa09257ea84ed376a92987f7b31033e2560c` compiló, pero **no se ha ejecutado**: el S25 dejó de aparecer en ADB.

@@ -65,7 +65,7 @@ void sub_00401030(void);void sub_004932F0(void);void sub_00493230(void);
  * field is the getter value; 2 selects the call to 0x482f20. */
 static const struct {uint32_t mul,div,ref_int,sub,getter;} x87_inputs[4]={
     {0x3fc00000u,0x40400000u,640,0x3f000000u,2},{0x3fc00000u,0x40400000u,0,0x00000000u,1},
-    {0xbe800000u,0x40e00000u,0xfffffffdu,0x3dcccccdu,2},{0x40000000u,0x00000000u,1,0x3f800000u,0}};
+    {0xbe800000u,0x40e00000u,0xfffffffdu,0x3dcccccdu,2},{0x7f800000u,0x7f800000u,1,0x3f800000u,0}};
 static void setup_x87(unsigned m){
     MEM32(0x7c8a78)=x87_inputs[m].mul;MEM32(0x7c95a0)=x87_inputs[m].div;MEM32(0x7c8a74)=x87_inputs[m].ref_int;
     MEM32(0x7c908c)=x87_inputs[m].sub;MEM32(0x7d34f8)=x87_inputs[m].getter;
@@ -104,7 +104,10 @@ static int run_virtual_zero(void){
     }
     return 0;
 }
+#define MH_X87_CHECKS_NO_MAIN
+#include "test_x87_semantics.c"
 int main(int argc,char **argv){
+    if(argc==2&&!strcmp(argv[1],"--x87-semantics"))return mh_x87_semantic_checks();
     int null_object=argc==2&&!strcmp(argv[1],"--null-object"),missing_timer=argc==2&&!strcmp(argv[1],"--missing-timer"),missing_virtual=argc==2&&!strcmp(argv[1],"--missing-virtual"),null_virtual=argc==2&&!strcmp(argv[1],"--null-virtual-object"),virtual_zero=argc==2&&!strcmp(argv[1],"--virtual-zero");
     if(argc!=1&&!null_object&&!missing_timer&&!missing_virtual&&!null_virtual&&!virtual_zero)return 76;
     const uint32_t ticks[]={0,1234,0xffffffd0u,0xffffffffu};
