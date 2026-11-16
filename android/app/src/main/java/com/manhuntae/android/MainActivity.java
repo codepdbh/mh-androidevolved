@@ -217,15 +217,38 @@ public final class MainActivity extends Activity {
         long elapsed = android.os.SystemClock.elapsedRealtime() - started;
         boolean mainOk = main.exit == 0 && expected.getString("main_output_sha256").equals(main.sha256);
         boolean zeroOk = zero.exit == 0 && expected.getString("zero_output_sha256").equals(zero.sha256);
-        boolean all = mainOk && zeroOk && x87.exit == 0 && faultsOk == faults.length;
+        String loader = loaderReport();
+        elapsed = android.os.SystemClock.elapsedRealtime() - started;
+        boolean all = mainOk && zeroOk && x87.exit == 0 && faultsOk == faults.length && !loader.contains("distinto") && !loader.contains("no se");
         return (all ? "CORRECTO" : "FALLO") + " · código traducido del juego ejecutado en ARM64 dentro de la app (" + elapsed + " ms)\n"
             + "· Candidata de tiempo 0x6081a0 con 13 dependencias traducidas, 256 casos: " + (mainOk ? "salida idéntica a la validada frente a x86" : "salida distinta (código " + main.exit + ")") + "\n"
             + "· Rama de argumento cero, 12 casos: " + (zeroOk ? "idéntica" : "distinta (código " + zero.exit + ")") + "\n"
             + "· Semántica x87 en el proceso traducido: " + (x87.exit == 0 ? "correcta" : "fallo " + x87.exit) + "\n"
             + "· Fallos controlados esperados: " + faultsOk + " de " + faults.length + "\n"
+            + loader + "\n"
             + "Datos sintéticos y funciones restantes simuladas: no es el arranque del juego.";
     }
     private static final class RunResult { int exit; String sha256; }
+    /** Runs the translated slot loader 0x605750 over synthetic slot files in a private cache directory. */
+    private String loaderReport() throws IOException, InterruptedException, org.json.JSONException {
+        java.io.File binary = new java.io.File(getApplicationInfo().nativeLibraryDir, "libmhae_loader_test.so");
+        String expectedText;
+        try (InputStream in = getAssets().open("translated/loader_expected.json")) { expectedText = new String(readAll(in), java.nio.charset.StandardCharsets.UTF_8); }
+        catch (IOException e) { expectedText = null; }
+        if (!binary.isFile() || expectedText == null) return "· Cargador de archivos 0x605750: no incluido en esta compilación.";
+        org.json.JSONObject expected = new org.json.JSONObject(expectedText);
+        if (!expected.getString("binary_sha256").equals(sha256(readFile(binary)))) return "· Cargador de archivos: binario distinto del validado; no se ejecuta.";
+        java.io.File work = new java.io.File(getCacheDir(), "loader-" + System.nanoTime());
+        if (!work.mkdir()) return "· Cargador de archivos: no se pudo crear el directorio temporal.";
+        try {
+            RunResult r = runHarness(binary, work.getAbsolutePath());
+            boolean ok = r.exit == 0 && expected.getString("output_sha256").equals(r.sha256);
+            return "· Cargador de archivos 0x605750 (construcción de ruta, CreateFileA/ReadFile/CloseHandle reales de solo lectura, 16 casos): "
+                + (ok ? "idéntico a x86" : "distinto (código " + r.exit + ")");
+        } finally {
+            if (!work.delete()) work.deleteOnExit();
+        }
+    }
     private RunResult runHarness(java.io.File binary, String argument) throws IOException, InterruptedException {
         ProcessBuilder builder = argument == null ? new ProcessBuilder(binary.getAbsolutePath()) : new ProcessBuilder(binary.getAbsolutePath(), argument);
         builder.redirectError(ProcessBuilder.Redirect.to(new java.io.File("/dev/null")));

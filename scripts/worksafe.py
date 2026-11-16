@@ -1424,6 +1424,14 @@ def build_diagnostic_apk():
         if translated:
             apk.write(harness,'lib/arm64-v8a/libmhae_time_test.so')
             apk.writestr('assets/translated/time_expected.json',json.dumps(translated,indent=2)+'\n')
+        loader=ROOT/'private/analysis/loader/android/loader_test';loader_record=loader.parent/'validated.json'
+        if loader.is_file() and loader_record.is_file():
+            record=json.loads(loader_record.read_text(encoding='utf-8'))
+            if hashlib.sha256(loader.read_bytes()).hexdigest()==record.get('binary_sha256'):
+                apk.write(loader,'lib/arm64-v8a/libmhae_loader_test.so')
+                apk.writestr('assets/translated/loader_expected.json',json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
+                translated=translated or {}
+                translated['loader']=True
     aligned=out/'aligned.apk'; signed=out/'diagnostic-debug.apk'
     run([str(align),'-f','4',str(unsigned),str(aligned)],'diagnostic-zipalign')
     run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'sign','--ks',str(key),'--ks-pass','pass:android','--key-pass','pass:android','--out',str(signed),str(aligned)],'diagnostic-sign')
@@ -1458,6 +1466,89 @@ def install_diagnostic_on_s25():
     output=run(['-s',serial,'install',str(apk)],'diagnostic-install',120)
     if 'Success' not in output:raise WorkSafeError('installation result uncertain')
     return {'installation':'success','package':'com.manhuntae.android','scope':'diagnostic only'}
+
+def run_loader_on_s25():
+    """Compile the isolated slot-loader harness for ARM64, run it on one S25 and compare with x86.
+
+    The binary embeds translated game code and stays in private/. The device
+    session uses a fresh random directory; the harness creates and removes its
+    own synthetic slot files there, then the session removes exactly the binary
+    and the directory (non-recursive). No APK, game file or UI is touched."""
+    import base64,hashlib,re,secrets,sys,textwrap
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    deps=ROOT/'private/analysis/candidate_time/dependencies'
+    strings=json.loads((deps/'loader_strings_report.json').read_text(encoding='utf-8'))
+    if hashlib.sha256((deps/'loader_strings_unit.c').read_bytes()).hexdigest()!=strings['unit_sha256']:raise WorkSafeError('loader strings unit changed since lift')
+    reference=json.loads((ROOT/'private/analysis/loader/x86_reference.json').read_text(encoding='utf-8'))
+    if reference.get('strings_unit_sha256')!=strings['unit_sha256']:raise WorkSafeError('x86 reference is stale; rerun tools/probe_loader_x86.py')
+    inputs=[ROOT/'tests/loader_native.c',*(deps/n for n in ('loader_helpers_unit.c','file_lifecycle_unit.c','dep_00611640_precise.c','dep_00401030_precise.c','loader_strings_unit.c','dep_00605750_precise.c')),
+            *(ROOT/'runtime'/n for n in ('guest_memory.c','guest_memory.h','readonly_stream.c','readonly_stream.h','readonly_path.c','readonly_path.h','readonly_handles.c','readonly_handles.h')),
+            ROOT/'recomp/checked_memory_adapter.h',ROOT/'recomp/checked_dispatch_adapter.h',ROOT/'private/pcrecomp/runtime/recomp32/recomp_types.h']
+    manifest={str(p.relative_to(ROOT)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
+    if not clang.is_file() or not adb.is_file():raise WorkSafeError('NDK clang or adb missing')
+    out=ROOT/'private/analysis/loader/android';out.mkdir(parents=True,exist_ok=True);binary_path=out/'loader_test'
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',
+          '-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-I',str(ROOT/'private/analysis/candidate_time'),
+          str(ROOT/'tests/loader_native.c'),'-o',str(binary_path)]
+    built=_run_job(argv,180,'loader-arm64-build',cfg,max_processes=4,memory_mb=768)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('loader ARM64 build failed; inspect loader-arm64-build logs')
+    binary=binary_path.read_bytes();digest=hashlib.sha256(binary).hexdigest()
+    if binary[:4]!=b'\x7fELF' or int.from_bytes(binary[18:20],'little')!=183 or len(binary)>4*1024*1024:raise WorkSafeError('loader binary is not a bounded ARM64 ELF')
+    (out/'manifest.json').write_text(json.dumps({'binary_sha256':digest,'source_inputs':manifest},indent=2)+'\n',encoding='utf-8')
+    listing=_run_job([str(adb),'devices','-l'],15,'device-loader-list',cfg,max_processes=4,memory_mb=256)
+    text=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    ready=[p[0] for line in text.splitlines()[1:] if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8)
+    encoded='\n'.join(textwrap.wrap(base64.b64encode(binary).decode('ascii'),76))
+    script=('model=$(getprop ro.product.model)\n'
+        'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) echo MHAE_BAD_MODEL; exit 80;; esac\n'
+        'case ",$(getprop ro.product.cpu.abilist)," in *,arm64-v8a,*) ;; *) exit 81;; esac\n'
+        'printf "MHAE_MODEL=%s\\n" "$model"\n'
+        f'd={remote}\np="$d/loader_test"\n'
+        'if ! mkdir "$d"; then echo MHAE_MKDIR_FAILED; exit 82; fi\n'
+        'cleanup() { rm -f "$p" && rmdir "$d"; }\n'
+        'finish() { rc=$?; trap - EXIT; if cleanup; then echo MHAE_CLEANUP_OK; else echo MHAE_CLEANUP_FAILED >&2; [ "$rc" -eq 0 ] && rc=91; fi; exit "$rc"; }\n'
+        'trap finish EXIT\ntrap "exit 93" HUP INT TERM\n'
+        "if ! base64 -d > \"$p\" <<'MHAE_PAYLOAD'\n"+encoded+'\nMHAE_PAYLOAD\n'
+        'then echo MHAE_DECODE_FAILED; exit 83; fi\n'
+        'set -- $(sha256sum "$p")\n'
+        f'if [ "${{1:-}}" != "{digest}" ]; then echo MHAE_HASH_FAILED; exit 84; fi\n'
+        'chmod 700 "$p" || exit 85\n'
+        'echo MHAE_BEGIN_LOADER\n"$p" "$d"; rc=$?\necho MHAE_END_LOADER\n'
+        'if [ "$rc" -ne 0 ]; then echo MHAE_LOADER_FAILED=$rc; exit 86; fi\n'
+        'echo MHAE_TESTS_PASSED\nexit 0\n').encode('ascii')
+    shell=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Git'/'bin'/'sh.exe'
+    if shell.is_file():
+        syntax=_run_job([str(shell),'-n'],15,'device-loader-shell-check',cfg,max_processes=2,memory_mb=256,input_bytes=script)
+        if syntax['timed_out'] or syntax['returncode']!=0:raise WorkSafeError('device script failed syntax check')
+    attempt=ROOT/'logs/device-loader-attempt.json'
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'},indent=2)+'\n',encoding='utf-8')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],120,'device-loader-session',cfg,max_processes=4,memory_mb=512,input_bytes=script)
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').replace('\r\n','\n')
+    cleanup='confirmed' if 'MHAE_CLEANUP_OK' in output else 'unconfirmed'
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':cleanup},indent=2)+'\n',encoding='utf-8')
+    if result['timed_out'] or result['returncode']!=0 or cleanup!='confirmed' or 'MHAE_TESTS_PASSED' not in output:
+        raise WorkSafeError('loader session failed or cleanup unconfirmed; inspect device-loader-session logs')
+    m=re.search(r'^MHAE_BEGIN_LOADER\n(.*?)^MHAE_END_LOADER$',output,re.MULTILINE|re.DOTALL)
+    if not m:raise WorkSafeError('missing loader output section')
+    jsonl=ROOT/'logs/loader-arm64.jsonl';jsonl.write_text(m.group(1),encoding='utf-8')
+    compared=_run_job([sys.executable,str(ROOT/'tests/compare_loader.py'),str(jsonl)],60,'loader-arm64-compare',cfg,max_processes=1,memory_mb=512)
+    passed=compared['returncode']==0 and not compared['timed_out']
+    models=re.findall(r'^MHAE_MODEL=(\S+)\s*$',output,re.MULTILINE)
+    record=out/'validated.json'
+    if passed:
+        # Lets the diagnostic APK check that in-app runs reproduce this S25-validated output.
+        record.write_text(json.dumps({'binary_sha256':digest,'model':models[0] if len(models)==1 else None,
+            'output_sha256':hashlib.sha256(m.group(1).encode('utf-8')).hexdigest(),
+            'compared_against':'Unicorn x86 reference (tools/probe_loader_x86.py, tests/compare_loader.py)'},indent=2)+'\n',encoding='utf-8')
+    elif record.is_file():record.unlink()
+    return {'model':models[0] if len(models)==1 else None,'binary_sha256':digest,'cleanup':cleanup,'passed':passed,
+            'comparison':Path(compared['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip()}
 
 def update_diagnostic_on_s25():
     """Replace the installed diagnostic package in place (same debug signature), keeping its data.

@@ -4,6 +4,7 @@ El juego todavía no es jugable. La APK instalada es un diagnóstico: selecciona
 
 ## Verificado
 
+- **Cargador `0x605750` (16-11):** 21 funciones traducidas con apertura y lectura reales de solo lectura; 16 casos idénticos a x86 en el S25 y dentro de la app. Ver `evidence/S25_LOADER.md`.
 - **App en el S25 (16-11):** autodiagnóstico ARM64, lectura real de `manhunt.exe` por descriptor SAF con la capa del port y ejecución dentro de la app del código traducido de la candidata de tiempo, con salida idéntica a la validada frente a x86. APK privada por contener ese código; ver `evidence/S25_APP_SELFTEST.md`.
 - S25 Ultra SM-S938B conectado y autorizado; carpeta `/sdcard/mh-androidevolved` presente.
 - Recorrido anterior de selección de carpeta, identificación del ejecutable y diagnóstico JNI en el teléfono.

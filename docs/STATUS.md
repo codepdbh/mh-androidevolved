@@ -1,5 +1,7 @@
 # Estado técnico
 
+2026-11-16, más reciente: el cargador de ranuras `0x605750` funciona traducido en ARM64 con 21 funciones reales del juego (clase de cadenas, lectura por bloques y ciclo de archivo) sobre la capa real de handles de solo lectura. En el S25 coincidió con x86 en 16 casos: ranura exacta, byte sobrante, archivo corto e inexistente. También se ejecuta dentro de la app, con resultado idéntico. Siguen como dobles el asignador de pool y la liberación del juego. Ver `docs/evidence/S25_LOADER.md`.
+
 2026-11-16, más reciente: la app instalada en el S25 ejecuta ahora en ARM64 un autodiagnóstico del runtime y lee `manhunt.exe` por descriptor SAF con la capa de solo lectura del port; los 6 304 256 bytes resultaron idénticos a los verificados. Un botón ejecuta en un proceso aislado la candidata de tiempo traducida, y su salida fue idéntica a la validada frente a x86 (256 + 12 casos, x87 y 4 de 4 fallos). Es la primera vez que código traducido del juego corre dentro de la app. Sigue sin ser jugable. Ver `docs/evidence/S25_APP_SELFTEST.md`.
 
 Actualización posterior: el S25 se reconectó. Pasó la prueba de tabla de handles y apertura relativa real; se añadieron y probaron tres envoltorios traducidos para completar abrir/leer/cerrar. Los archivos mantuvieron sus hashes y se confirmó limpieza. FIFO quedó excluido por una denegación del dispositivo. Los adaptadores aún son específicos del arnés y no están integrados en el juego. Ver `docs/evidence/S25_READONLY_HANDLES.md`.
