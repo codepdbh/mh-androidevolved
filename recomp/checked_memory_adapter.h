@@ -89,4 +89,25 @@ static inline void mh_recomp_rep_movs(uint32_t edi, uint32_t esi, uint32_t n, ui
         memcpy(dst + k, src + k, esz);
     }
 }
+
+/* Checked replacement for PCRecomp's inline `rep stos` (memset on ADDR). Stores
+ * the low esz bytes of value n times; the whole range is validated first, so
+ * an invalid range faults without partial progress. Does not update EDI/ECX. */
+static inline void mh_recomp_rep_stos(uint32_t edi, uint32_t value, uint32_t n, uint32_t esz, int df) {
+    uint64_t total = (uint64_t)n * esz;
+    uint32_t b, start;
+    uint8_t *dst, pattern[4];
+    if (!n) return;
+    if ((esz != 1 && esz != 2 && esz != 4) || total > UINT32_MAX || (df <= 0 && edi + esz < (uint32_t)total)) {
+        mh_guest_fault(edi, (size_t)esz);
+        abort();
+    }
+    b = (uint32_t)total;
+    start = df > 0 ? edi : edi - b + esz;
+    dst = (uint8_t *)mh_recomp_access(start, b);
+    pattern[0] = (uint8_t)value; pattern[1] = (uint8_t)(value >> 8);
+    pattern[2] = (uint8_t)(value >> 16); pattern[3] = (uint8_t)(value >> 24);
+    if (esz == 1) { memset(dst, pattern[0], b); return; }
+    for (uint32_t k = 0; k < b; k += esz) memcpy(dst + k, pattern, esz);
+}
 #endif

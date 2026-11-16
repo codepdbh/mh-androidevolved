@@ -217,7 +217,8 @@ public final class MainActivity extends Activity {
         long elapsed = android.os.SystemClock.elapsedRealtime() - started;
         boolean mainOk = main.exit == 0 && expected.getString("main_output_sha256").equals(main.sha256);
         boolean zeroOk = zero.exit == 0 && expected.getString("zero_output_sha256").equals(zero.sha256);
-        String loader = loaderReport();
+        String loader = loaderReport() + "\n" + validatedReport("libmhae_allocator_test.so", "translated/allocator_expected.json",
+            "Asignador de memoria del juego (constructor, reservar y liberar; 16 casos, 960 operaciones)");
         elapsed = android.os.SystemClock.elapsedRealtime() - started;
         boolean all = mainOk && zeroOk && x87.exit == 0 && faultsOk == faults.length && !loader.contains("distinto") && !loader.contains("no se");
         return (all ? "CORRECTO" : "FALLO") + " · código traducido del juego ejecutado en ARM64 dentro de la app (" + elapsed + " ms)\n"
@@ -248,6 +249,18 @@ public final class MainActivity extends Activity {
         } finally {
             if (!work.delete()) work.deleteOnExit();
         }
+    }
+    /** Runs one private validated binary without arguments and checks the SHA-256 of its output. */
+    private String validatedReport(String library, String asset, String label) throws IOException, InterruptedException, org.json.JSONException {
+        java.io.File binary = new java.io.File(getApplicationInfo().nativeLibraryDir, library);
+        String expectedText;
+        try (InputStream in = getAssets().open(asset)) { expectedText = new String(readAll(in), java.nio.charset.StandardCharsets.UTF_8); }
+        catch (IOException e) { expectedText = null; }
+        if (!binary.isFile() || expectedText == null) return "· " + label + ": no incluido en esta compilación.";
+        org.json.JSONObject expected = new org.json.JSONObject(expectedText);
+        if (!expected.getString("binary_sha256").equals(sha256(readFile(binary)))) return "· " + label + ": binario distinto del validado; no se ejecuta.";
+        RunResult r = runHarness(binary, null);
+        return "· " + label + ": " + (r.exit == 0 && expected.getString("output_sha256").equals(r.sha256) ? "idéntico a x86" : "distinto (código " + r.exit + ")");
     }
     private RunResult runHarness(java.io.File binary, String argument) throws IOException, InterruptedException {
         ProcessBuilder builder = argument == null ? new ProcessBuilder(binary.getAbsolutePath()) : new ProcessBuilder(binary.getAbsolutePath(), argument);

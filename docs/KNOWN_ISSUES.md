@@ -1,5 +1,7 @@
 # Problemas conocidos
 
+- Banderas indefinidas: tras `IMUL`, Intel no define SF/ZF/AF/PF, y el C traducido y Unicorn pueden diferir ahí. El comparador del asignador solo exige CF/OF en esos casos. Si algún código del juego dependiera de banderas indefinidas, la traducción no garantizaría el valor del hardware real.
+
 - El 16-11 el propietario autorizó omitir los umbrales de RAM libre (`MHAE_OWNER_RAM_OVERRIDE=1`, solo por variable de entorno y registrado en `logs/ram-override.log`). No está activo por defecto. Siguen los límites por proceso y un mínimo de 512 MiB. La APK con `libmhae_time_test.so` contiene código traducido del juego y es solo para uso privado.
 
 2026-11-16, actualización posterior: se ejecutó el arnés con NaN en el S25 y coincidieron los 256 + 12 casos; también pasaron 12 comprobaciones x87 y los cuatro fallos esperados. Queda resuelto el bloqueo de verificación ARM64 del NaN descrito debajo. Persisten los límites de precisión de la FPU y la falta de un runtime completo jugable.

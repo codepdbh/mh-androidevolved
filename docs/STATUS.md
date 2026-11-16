@@ -1,5 +1,7 @@
 # Estado técnico
 
+2026-11-16, más reciente: el asignador de memoria del juego (pool `0x67d000`: constructor, reservar y liberar; 12 funciones) está traducido y coincide con x86 en 16 casos y 960 operaciones en Windows x64 y en el S25. El cargador `0x605750` lo usa ya en lugar de dobles de prueba: 33 funciones traducidas trabajando juntas, idénticas a x86 en el S25 y dentro de la app. Ver `docs/evidence/S25_ALLOCATOR.md`.
+
 2026-11-16, más reciente: el cargador de ranuras `0x605750` funciona traducido en ARM64 con 21 funciones reales del juego (clase de cadenas, lectura por bloques y ciclo de archivo) sobre la capa real de handles de solo lectura. En el S25 coincidió con x86 en 16 casos: ranura exacta, byte sobrante, archivo corto e inexistente. También se ejecuta dentro de la app, con resultado idéntico. Siguen como dobles el asignador de pool y la liberación del juego. Ver `docs/evidence/S25_LOADER.md`.
 
 2026-11-16, más reciente: la app instalada en el S25 ejecuta ahora en ARM64 un autodiagnóstico del runtime y lee `manhunt.exe` por descriptor SAF con la capa de solo lectura del port; los 6 304 256 bytes resultaron idénticos a los verificados. Un botón ejecuta en un proceso aislado la candidata de tiempo traducida, y su salida fue idéntica a la validada frente a x86 (256 + 12 casos, x87 y 4 de 4 fallos). Es la primera vez que código traducido del juego corre dentro de la app. Sigue sin ser jugable. Ver `docs/evidence/S25_APP_SELFTEST.md`.

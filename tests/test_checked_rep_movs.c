@@ -53,6 +53,24 @@ int main(void) {
         if (bad[i].df > 0 && fault_address != bad[i].at && i != 1) return 14;
         faults++;
     }
-    printf("%u rep movs cases match; %u out-of-range copies rejected without writes\n", cases, faults);
+    /* rep stos against an element-by-element model, both directions and widths. */
+    unsigned stos = 0;
+    for (unsigned s = 0; s < 3; s++) for (int df = -1; df <= 1; df += 2)
+    for (uint32_t n = 0; n <= 20; n++) for (uint32_t d = 0; d < 48; d += 3) {
+        uint32_t esz = sizes[s], value = 0xA1B2C3D4u ^ (n * 0x01010101u);
+        uint32_t edi = BASE + 64 + d + (df < 0 && n ? n * esz - esz : 0), at = edi;
+        fill();
+        mh_recomp_rep_stos(edi, value, n, esz, df);
+        for (uint32_t i = 0; i < n; i++) {
+            for (uint32_t j = 0; j < esz; j++) model[at - BASE + j] = (uint8_t)(value >> (8 * j));
+            at += (uint32_t)(df * (int)esz);
+        }
+        if (memcmp(guest, model, SIZE)) { printf("stos mismatch esz=%u df=%d n=%u d=%u\n", esz, df, n, d); return 15; }
+        stos++;
+    }
+    fill();
+    if (setjmp(fault_jump) == 0) { mh_recomp_rep_stos(BASE + SIZE - 3, 0, 1, 4, 1); return 16; }
+    if (memcmp(guest, model, SIZE) || fault_address != BASE + SIZE - 3) return 17;
+    printf("%u rep movs cases match; %u out-of-range copies rejected without writes; %u rep stos cases match\n", cases, faults, stos);
     return 0;
 }

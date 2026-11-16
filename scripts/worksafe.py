@@ -1432,6 +1432,14 @@ def build_diagnostic_apk():
                 apk.writestr('assets/translated/loader_expected.json',json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
                 translated=translated or {}
                 translated['loader']=True
+        allocator=ROOT/'private/analysis/allocator/android/allocator_test';allocator_record=allocator.parent/'validated.json'
+        if allocator.is_file() and allocator_record.is_file():
+            record=json.loads(allocator_record.read_text(encoding='utf-8'))
+            if hashlib.sha256(allocator.read_bytes()).hexdigest()==record.get('binary_sha256'):
+                apk.write(allocator,'lib/arm64-v8a/libmhae_allocator_test.so')
+                apk.writestr('assets/translated/allocator_expected.json',json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
+                translated=translated or {}
+                translated['allocator']=True
     aligned=out/'aligned.apk'; signed=out/'diagnostic-debug.apk'
     run([str(align),'-f','4',str(unsigned),str(aligned)],'diagnostic-zipalign')
     run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'sign','--ks',str(key),'--ks-pass','pass:android','--key-pass','pass:android','--out',str(signed),str(aligned)],'diagnostic-sign')
@@ -1484,6 +1492,7 @@ def run_loader_on_s25():
     reference=json.loads((ROOT/'private/analysis/loader/x86_reference.json').read_text(encoding='utf-8'))
     if reference.get('strings_unit_sha256')!=strings['unit_sha256']:raise WorkSafeError('x86 reference is stale; rerun tools/probe_loader_x86.py')
     inputs=[ROOT/'tests/loader_native.c',*(deps/n for n in ('loader_helpers_unit.c','file_lifecycle_unit.c','dep_00611640_precise.c','dep_00401030_precise.c','loader_strings_unit.c','dep_00605750_precise.c')),
+            ROOT/'private/analysis/allocator/allocator_unit.c',
             *(ROOT/'runtime'/n for n in ('guest_memory.c','guest_memory.h','readonly_stream.c','readonly_stream.h','readonly_path.c','readonly_path.h','readonly_handles.c','readonly_handles.h')),
             ROOT/'recomp/checked_memory_adapter.h',ROOT/'recomp/checked_dispatch_adapter.h',ROOT/'private/pcrecomp/runtime/recomp32/recomp_types.h']
     manifest={str(p.relative_to(ROOT)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
@@ -1549,6 +1558,84 @@ def run_loader_on_s25():
     elif record.is_file():record.unlink()
     return {'model':models[0] if len(models)==1 else None,'binary_sha256':digest,'cleanup':cleanup,'passed':passed,
             'comparison':Path(compared['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip()}
+
+def _run_binary_on_s25(binary,label,args=''):
+    """Upload one private ARM64 test binary to a fresh random directory on one S25, run it
+    once with `"$d"` substituted in args, and remove exactly that file and directory.
+    Returns the program's stdout (LF). Raises on failure or unconfirmed cleanup."""
+    import base64,hashlib,re,secrets,textwrap
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or not re.fullmatch(r'(\"\$d\")?',args):raise WorkSafeError('invalid device run parameters')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
+    if not adb.is_file():raise WorkSafeError('adb missing')
+    if binary[:4]!=b'\x7fELF' or int.from_bytes(binary[18:20],'little')!=183 or len(binary)>4*1024*1024:raise WorkSafeError('not a bounded ARM64 ELF')
+    digest=hashlib.sha256(binary).hexdigest()
+    listing=_run_job([str(adb),'devices','-l'],15,f'device-{label}-list',cfg,max_processes=4,memory_mb=256)
+    text=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    ready=[p[0] for line in text.splitlines()[1:] if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8)
+    encoded='\n'.join(textwrap.wrap(base64.b64encode(binary).decode('ascii'),76))
+    script=('case "$(getprop ro.product.model)" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 80;; esac\n'
+        'case ",$(getprop ro.product.cpu.abilist)," in *,arm64-v8a,*) ;; *) exit 81;; esac\n'
+        f'd={remote}\np="$d/test"\n'
+        'mkdir "$d" || exit 82\n'
+        'cleanup() { rm -f "$p" && rmdir "$d"; }\n'
+        'finish() { rc=$?; trap - EXIT; if cleanup; then echo MHAE_CLEANUP_OK; else echo MHAE_CLEANUP_FAILED >&2; [ "$rc" -eq 0 ] && rc=91; fi; exit "$rc"; }\n'
+        'trap finish EXIT\ntrap "exit 93" HUP INT TERM\n'
+        "base64 -d > \"$p\" <<'MHAE_PAYLOAD' || exit 83\n"+encoded+'\nMHAE_PAYLOAD\n'
+        'set -- $(sha256sum "$p")\n'
+        f'[ "${{1:-}}" = "{digest}" ] || exit 84\n'
+        'chmod 700 "$p" || exit 85\n'
+        f'echo MHAE_BEGIN\n"$p" {args}; rc=$?\necho MHAE_END\n'
+        '[ "$rc" -eq 0 ] || { echo MHAE_PROGRAM_FAILED=$rc; exit 86; }\n'
+        'echo MHAE_TESTS_PASSED\nexit 0\n').encode('ascii')
+    attempt=ROOT/f'logs/device-{label}-attempt.json'
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'},indent=2)+'\n',encoding='utf-8')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],180,f'device-{label}-session',cfg,max_processes=4,memory_mb=512,input_bytes=script)
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').replace('\r\n','\n')
+    cleanup='confirmed' if 'MHAE_CLEANUP_OK' in output else 'unconfirmed'
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':cleanup},indent=2)+'\n',encoding='utf-8')
+    if result['timed_out'] or result['returncode']!=0 or cleanup!='confirmed' or 'MHAE_TESTS_PASSED' not in output:
+        raise WorkSafeError(f'{label} device session failed or cleanup unconfirmed; inspect device-{label}-session logs')
+    m=re.search(r'^MHAE_BEGIN\n(.*?)^MHAE_END$',output,re.MULTILINE|re.DOTALL)
+    if not m:raise WorkSafeError('missing program output')
+    return m.group(1)
+
+def test_allocator(on_device=True):
+    """Compare the translated pool allocator with the x86 reference on Windows x64 and, optionally, the S25."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    base=ROOT/'private/analysis/allocator';report=json.loads((base/'allocator_report.json').read_text(encoding='utf-8'))
+    if hashlib.sha256((base/'allocator_unit.c').read_bytes()).hexdigest()!=report['unit_sha256']:raise WorkSafeError('allocator unit changed since lift')
+    reference=json.loads((base/'x86_reference.json').read_text(encoding='utf-8'))
+    if reference.get('unit_sha256')!=report['unit_sha256']:raise WorkSafeError('x86 reference is stale; rerun tools/probe_allocator_x86.py')
+    includes=['-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-I',str(base)]
+    cl,env=_msvc_env();exe=base/'allocator-test.exe'
+    built=_run_job([str(cl),'/nologo','/Od','/std:c11',*[a.replace('-I','/I') for a in includes],'/Fo'+str(base)+'\\','/Fe'+str(exe),
+                    str(ROOT/'tests/allocator_native.c'),'/link','/INCREMENTAL:NO'],120,'allocator-host-build',cfg,max_processes=4,memory_mb=768,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('allocator host build failed; inspect allocator-host-build logs')
+    ran=_run_job([str(exe)],60,'allocator-host-run',cfg,max_processes=1,memory_mb=256)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('allocator host run failed with code '+str(ran['returncode']))
+    host=_run_job([sys.executable,str(ROOT/'tests/compare_allocator.py'),ran['log']+'.stdout.log','windows-x64'],60,'allocator-host-compare',cfg,max_processes=1,memory_mb=512)
+    results={'windows-x64':Path(host['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip() if host['returncode']==0 else 'MISMATCH'}
+    if host['returncode']!=0:raise WorkSafeError('allocator differs on Windows x64; inspect allocator-host-compare logs')
+    if on_device:
+        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+        out=base/'android';out.mkdir(exist_ok=True);binary=out/'allocator_test'
+        arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',*includes,
+                      str(ROOT/'tests/allocator_native.c'),'-o',str(binary)],180,'allocator-arm64-build',cfg,max_processes=4,memory_mb=768)
+        if arm['returncode']!=0 or arm['timed_out']:raise WorkSafeError('allocator ARM64 build failed')
+        output=_run_binary_on_s25(binary.read_bytes(),'allocator')
+        jsonl=ROOT/'logs/allocator-arm64.jsonl';jsonl.write_text(output,encoding='utf-8')
+        dev=_run_job([sys.executable,str(ROOT/'tests/compare_allocator.py'),str(jsonl),'android-arm64'],60,'allocator-arm64-compare',cfg,max_processes=1,memory_mb=512)
+        if dev['returncode']!=0:raise WorkSafeError('allocator differs on the S25; inspect allocator-arm64-compare logs')
+        results['android-arm64']=Path(dev['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip()
+        (out/'validated.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
+            'output_sha256':hashlib.sha256(output.encode('utf-8')).hexdigest(),'compared_against':'tools/probe_allocator_x86.py'},indent=2)+'\n',encoding='utf-8')
+    return results
 
 def update_diagnostic_on_s25():
     """Replace the installed diagnostic package in place (same debug signature), keeping its data.

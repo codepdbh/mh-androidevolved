@@ -1,8 +1,8 @@
 /* Isolated test of the translated slot loader 0x605750 over the real read-only
  * file layer (Android/POSIX only). Synthetic slot files are created under the
- * directory given as argv[1] and removed before exit. Pool allocate/free are
- * test doubles; CreateFileA/ReadFile/CloseHandle are the observed read-only
- * subset implemented by runtime/readonly_handles. Output is compared on the PC
+ * directory given as argv[1] and removed before exit. Only the CRT malloc of the arena is
+ * a test double; CreateFileA/ReadFile/CloseHandle are the observed read-only
+ * subset implemented by runtime/readonly_handles; the pool allocator is the translated one. Output is compared on the PC
  * against tools/probe_loader_x86.py (Unicorn). */
 #define _GNU_SOURCE
 #define RECOMP_GENERATED_CODE
@@ -28,16 +28,12 @@ static unsigned api_opens,api_reads,api_closes;
 void mh_guest_fault(uint32_t a,size_t n){(void)a;(void)n;exit(70);}
 void mh_dispatch_fault(uint32_t a,uint32_t c){(void)a;(void)c;exit(74);}
 
-/* Pool allocator doubles, identical to the x86 stubs in the probe: a bump
- * allocator (state 0x8bfff0) and a free recorder (count 0x8bfff4, last 0x8bfff8). */
-void sub_00401350(void){
-    if(MEM32(g_esp)!=0x40102e||g_ecx!=0x67d000)exit(86);
-    g_eax=MEM32(0x8bfff0);g_edx=(MEM32(g_esp+4)+15u)&~15u;MEM32(0x8bfff0)+=g_edx;g_esp+=8;
-}
-void sub_00401B00(void){
-    if(MEM32(g_esp)!=0x40103e||g_ecx!=0x67d000)exit(87);
-    g_edx=MEM32(g_esp+4);MEM32(0x8bfff8)=g_edx;MEM32(0x8bfff4)+=1;g_esp+=8;
-}
+/* The game's own pool allocator (translated, ../allocator/allocator_unit.c) serves
+ * every string allocation. Only the CRT malloc that provides its arena is a double. */
+#define POOL 0x67d000u
+#define ARENA 0x8c0000u
+#define ARENA_SIZE 0x8000u
+void sub_00610BE0(void){if(MEM32(g_esp)!=0x40112b)exit(86);g_eax=ARENA;g_esp+=4;}
 /* Read-only API subset, as observed at these exact call sites. */
 static void api_read_file(void){
     if(MEM32(g_esp)!=0x60ff76)exit(80);
@@ -70,6 +66,7 @@ recomp_func_t recomp_lookup_import(uint32_t va){(void)va;return NULL;}
 #include "dependencies/dep_00401030_precise.c"
 #include "dependencies/loader_strings_unit.c"
 #include "dependencies/dep_00605750_precise.c"
+#include "../allocator/allocator_unit.c"
 
 static const uint32_t block_sizes[7]={4,16,1,64,3,128,8};
 static const unsigned file_sizes[4]={224,225,100,0}; /* exact, one extra byte, short, missing */
@@ -110,8 +107,11 @@ int main(int argc,char **argv){
         if(fd<0||mh_ro_bind_root(&files,fd)!=MH_RO_OK)return 73;
         close(fd);api_opens=api_reads=api_closes=0;
         memset(guest+0x830000,0,0x2000);memset(guest+0x840000,0,0x800);memset(guest+0x87fe00,0,0x300);
-        memset(guest+0x8bfff0,0,0x10);memset(guest+0x8c0000,0,0x400);memset(guest+0x7d7c10,0,0x200);
-        MEM32(0x8bfff0)=0x8c0000;
+        memset(guest+POOL,0,0x1300);memset(guest+ARENA,0,ARENA_SIZE);memset(guest+0x7d7c10,0,0x200);
+        /* pool constructor (0x4010b0) over the 32 KiB arena, as the game's static initialiser does */
+        g_eax=g_ebx=g_edx=g_esi=g_edi=g_ebp=0;g_flag_k=g_flag_a=g_flag_b=g_flag_cf=0;
+        g_ecx=POOL;g_esp=0x880000;MEM32(g_esp)=0x8f0000;MEM32(g_esp+4)=ARENA_SIZE;sub_004010B0();
+        if(g_esp!=0x880008)return 74;
         MEM32(0x81b37c)=0x800400;MEM32(0x81b374)=0x800300;MEM32(0x81b370)=0x800500;
         put_string(0x831000,"data\\");MEM32(0x8302ac)=0x831000;MEM16(0x8302b0)=5;MEM16(0x8302b2)=0;
         put_string(0x7d7d88,"save\\");
@@ -128,7 +128,7 @@ int main(int argc,char **argv){
         printf("\"api\":[%u,%u,%u],\"stack_hex\":\"",api_opens,api_reads,api_closes);hex(0x87fe00,0x300);
         printf("\",\"object_hex\":\"");hex(0x830000,0x180);
         printf("\",\"buffers_hex\":\"");hex(0x840000,0x700);
-        printf("\",\"heap_hex\":\"");hex(0x8bfff0,0x210);
+        printf("\",\"heap_hex\":\"");hex(POOL,0x1268);hex(ARENA,ARENA_SIZE);
         printf("\"}\n");
         mh_ro_unbind(&files);
     }

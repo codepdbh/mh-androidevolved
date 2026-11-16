@@ -1,8 +1,8 @@
 """x86 reference for the isolated slot-loader test (tests/loader_native.c).
 
 Runs the real .text of the verified executable in Unicorn from 0x605750 with
-the same synthetic memory as the C harness. Pool allocate/free are replaced by
-small x86 stubs equivalent to the C doubles; the read-only CreateFileA/ReadFile/
+the same synthetic memory as the C harness. The game's pool allocator runs for real;
+only the CRT malloc providing its arena is a stub; the read-only CreateFileA/ReadFile/
 CloseHandle subset is emulated in Python over in-memory files, with the same
 handle numbering as runtime/readonly_handles (first handle 0x40000010).
 Does not launch the game. Output: private/analysis/loader/x86_reference.json.
@@ -16,10 +16,9 @@ from inspect_entrypoint import ROOT,GAME,EXPECTED
 REGS={'eax':UC_X86_REG_EAX,'ebx':UC_X86_REG_EBX,'ecx':UC_X86_REG_ECX,'edx':UC_X86_REG_EDX,'esi':UC_X86_REG_ESI,
       'edi':UC_X86_REG_EDI,'ebp':UC_X86_REG_EBP,'esp':UC_X86_REG_ESP,'eflags':UC_X86_REG_EFLAGS}
 BLOCK_SIZES=(4,16,1,64,3,128,8);FILE_SIZES=(224,225,100,None)
-# mov eax,[0x8bfff0]; mov edx,[esp+4]; add edx,15; and edx,-16; add [0x8bfff0],edx; ret 4
-ALLOC=bytes.fromhex('a1f0ff8b00')+bytes.fromhex('8b542404')+bytes.fromhex('83c20f')+bytes.fromhex('83e2f0')+bytes.fromhex('0115f0ff8b00')+bytes.fromhex('c20400')
-# mov edx,[esp+4]; mov [0x8bfff8],edx; add dword [0x8bfff4],1; ret 4
-FREE=bytes.fromhex('8b542404')+bytes.fromhex('8915f8ff8b00')+bytes.fromhex('8305f4ff8b0001')+bytes.fromhex('c20400')
+POOL,ARENA,ARENA_SIZE=0x67d000,0x8c0000,0x8000
+# CRT malloc double for the pool arena: mov eax,ARENA; ret
+MALLOC=bytes([0xb8])+struct.pack('<I',ARENA)+bytes([0xc3])
 def files():
     out={}
     for s,size in enumerate(FILE_SIZES):
@@ -42,15 +41,20 @@ def main():
     for k in range(16):
         scenario,alignment=k%4,k//4
         cpu=Uc(UC_ARCH_X86,UC_MODE_32);cpu.mem_map(0x400000,0x500000);cpu.mem_write(code_start,code)
-        cpu.mem_write(0x401350,ALLOC);cpu.mem_write(0x401b00,FREE)
+        cpu.mem_write(0x610be0,MALLOC)
         for stub in (0x800300,0x800400,0x800500):cpu.mem_write(stub,b'\xc3')
         w32=lambda a,v:cpu.mem_write(a,struct.pack('<I',v&0xffffffff))
         r32=lambda a:struct.unpack('<I',cpu.mem_read(a,4))[0]
-        w32(0x8bfff0,0x8c0000);w32(0x81b37c,0x800400);w32(0x81b374,0x800300);w32(0x81b370,0x800500)
+        w32(0x81b37c,0x800400);w32(0x81b374,0x800300);w32(0x81b370,0x800500)
         cpu.mem_write(0x831000,b'data\\\0');w32(0x8302ac,0x831000);cpu.mem_write(0x8302b0,struct.pack('<hh',5,0))
         cpu.mem_write(0x7d7d88,b'save\\\0')
         for i in range(4):cpu.mem_write(0x7d7c10+32*i,f'slot{i}.bin'.encode()+b'\0')
         for i in range(4):w32(0x830000+i*84+0xc,0x1000+i)
+        # The game's pool constructor over the arena, as the static initialiser does.
+        for name,value in [('eax',0),('ebx',0),('ecx',POOL),('edx',0),('esi',0),('edi',0),('ebp',0),('esp',0x880000),('eflags',2)]:cpu.reg_write(REGS[name],value)
+        w32(0x880000,0x8f0000);w32(0x880004,ARENA_SIZE)
+        cpu.emu_start(0x4010b0,0x8f0000,timeout=2000000,count=200000)
+        if cpu.reg_read(UC_X86_REG_EIP)!=0x8f0000 or cpu.reg_read(UC_X86_REG_ESP)!=0x880008:raise SystemExit('pool constructor did not return')
         sp=0x880000+alignment
         for name,value in [('eax',0x11111111),('ebx',0x22222222),('ecx',0x830000),('edx',0x33333333),('esi',0x44444444),
                            ('edi',0x55555555),('ebp',0x66666666),('esp',sp),('eflags',2)]:cpu.reg_write(REGS[name],value)
@@ -91,7 +95,7 @@ def main():
         if cpu.reg_read(UC_X86_REG_EIP)!=0x8f0000:raise SystemExit('loader did not return')
         cases.append({'scenario':scenario,'alignment':alignment,'registers':{n:cpu.reg_read(r) for n,r in REGS.items()},'api':state['api'],
                       'stack_hex':bytes(cpu.mem_read(0x87fe00,0x300)).hex(),'object_hex':bytes(cpu.mem_read(0x830000,0x180)).hex(),
-                      'buffers_hex':bytes(cpu.mem_read(0x840000,0x700)).hex(),'heap_hex':bytes(cpu.mem_read(0x8bfff0,0x210)).hex()})
+                      'buffers_hex':bytes(cpu.mem_read(0x840000,0x700)).hex(),'heap_hex':bytes(cpu.mem_read(POOL,0x1268)).hex()+bytes(cpu.mem_read(ARENA,ARENA_SIZE)).hex()})
     out=ROOT/'private/analysis/loader';out.mkdir(parents=True,exist_ok=True)
     (out/'x86_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'strings_unit_sha256':report['unit_sha256'],
         'scope':'0x605750 with real .text; pool allocator doubles; emulated read-only file API','cases':cases},indent=2)+'\n',encoding='utf-8')

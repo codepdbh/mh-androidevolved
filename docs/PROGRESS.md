@@ -1,5 +1,7 @@
 # Progreso
 
+2026-11-16: traducido el asignador del juego (`tools/lift_allocator.py`, 12 funciones) con el nuevo `mh_recomp_rep_stos` comprobado. Perfiles `test_allocator()` (Windows x64 y S25) y `_run_binary_on_s25()` reutilizable. El cargador usa el asignador real. Corregidos dos fallos del arnés: un registro dentro de la arena y registros sin reiniciar antes del constructor.
+
 2026-11-16: traducidas las siete funciones restantes del cargador `0x605750` (`tools/lift_loader_strings.py`). Nuevo arnés Android `tests/loader_native.c`, referencia Unicorn `tools/probe_loader_x86.py` y perfil `run_loader_on_s25()`, que guarda el manifiesto de fuentes y el registro de validación. 16 casos coinciden en el S25. La app ejecuta el cargador validado y su salida es idéntica.
 
 2026-11-13: añadidos `recomp/x87_semantics.h` y `tests/test_x87_semantics.c` (perfil `test_x87_semantics()`, CTest y modo `--x87-semantics` del arnés de tiempo, que también corre en la sesión del S25). Caso NaN incorporado a la candidata de tiempo; Windows x64 coincide. Ejecución en el S25 bloqueada: el dispositivo dejó de aparecer en `adb devices`.
