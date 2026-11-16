@@ -31,11 +31,17 @@ public final class MainActivity extends Activity {
     private static final int KNOWN_EXE_SIZE = 6304256;
     private static native String nativeGetRuntimeDiagnostic();
     private static native String nativeInspectKnownPe(byte[] executable);
+    private static native String nativeRunSelfTest();
+    private static native String nativeReadDescriptor(int fd, byte[] expected);
+    /** Optional private build artifacts: translated game code is never part of the public sources. */
+    private static final String TRANSLATED_HARNESS = "libmhae_time_test.so";
+    private static final String TRANSLATED_EXPECTED = "translated/time_expected.json";
+    private TextView translatedStatus;
 
     private static String runtimeDiagnostic() {
         try {
             System.loadLibrary("mh_runtime");
-            return nativeGetRuntimeDiagnostic();
+            return nativeGetRuntimeDiagnostic() + "\n\n" + nativeRunSelfTest();
         } catch (LinkageError | SecurityException e) {
             return "Diagnóstico nativo no disponible; juego no disponible.";
         }
@@ -59,6 +65,11 @@ public final class MainActivity extends Activity {
         Button folder = new Button(this); folder.setText("Seleccionar carpeta del juego");
         folder.setOnClickListener(v -> selectFolder()); layout.addView(folder);
         Button play = new Button(this); play.setText("Jugar · aún no disponible"); play.setEnabled(false); layout.addView(play);
+        layout.addView(text("Código traducido del juego", 20, Color.WHITE));
+        translatedStatus = text("Ejecuta en un proceso aislado la candidata de tiempo traducida con datos sintéticos y compara el resultado con el validado frente a x86. No arranca el juego.", 14, Color.LTGRAY);
+        layout.addView(translatedStatus);
+        Button translated = new Button(this); translated.setText("Ejecutar prueba de código traducido");
+        translated.setOnClickListener(v -> runTranslatedHarness(translated)); layout.addView(translated);
         layout.addView(text("Vista previa de controles", 20, Color.WHITE));
         layout.addView(text("Solo imágenes de diseño: las acciones y asignaciones del juego no están verificadas.", 14, Color.LTGRAY));
         for (String name : new String[]{"joystick_base", "attack_light", "aim", "interact", "run", "sneak", "pause"}) {
@@ -161,8 +172,95 @@ public final class MainActivity extends Activity {
         for (byte b : second.digest()) verified.append(String.format(java.util.Locale.ROOT, "%02x", b & 255));
         if (!KNOWN_SHA256.contentEquals(verified)) return "El ejecutable cambió durante la comprobación.";
         if (generation != validationGeneration) return "Comprobación cancelada.";
-        try { return nativeInspectKnownPe(data); }
+        String inspected;
+        try { inspected = nativeInspectKnownPe(data); }
         catch (LinkageError | SecurityException e) { return "Ejecutable identificado por SHA-256; análisis nativo no disponible. El juego sigue sin estar disponible."; }
+        if (generation != validationGeneration) return "Comprobación cancelada.";
+        // Same file again, now through a read-only descriptor and the port's native read layer.
+        try (android.os.ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(file, "r")) {
+            if (pfd == null) return inspected + "\n\nLectura por descriptor: el proveedor no devolvió descriptor.";
+            return inspected + "\n\n" + nativeReadDescriptor(pfd.getFd(), data);
+        } catch (LinkageError e) {
+            return inspected + "\n\nLectura por descriptor no disponible en esta biblioteca.";
+        }
+    }
+
+    /** Runs the private translated harness, if this build includes it, and checks its output hashes. */
+    private void runTranslatedHarness(Button button) {
+        button.setEnabled(false);
+        translatedStatus.setText("Ejecutando código traducido en un proceso aislado…");
+        new Thread(() -> {
+            String result;
+            try { result = translatedHarnessReport(); }
+            catch (IOException | InterruptedException | org.json.JSONException | SecurityException e) {
+                result = "La prueba no pudo completarse: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+            final String message = result;
+            runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { translatedStatus.setText(message); button.setEnabled(true); } });
+        }, "translated-harness").start();
+    }
+    private String translatedHarnessReport() throws IOException, InterruptedException, org.json.JSONException {
+        java.io.File binary = new java.io.File(getApplicationInfo().nativeLibraryDir, TRANSLATED_HARNESS);
+        String expectedText;
+        try (InputStream in = getAssets().open(TRANSLATED_EXPECTED)) { expectedText = new String(readAll(in), java.nio.charset.StandardCharsets.UTF_8); }
+        catch (IOException e) { expectedText = null; }
+        if (!binary.isFile() || expectedText == null)
+            return "Esta compilación no incluye código traducido: se genera solo en el PC del propietario a partir de su copia del juego y no se distribuye.";
+        org.json.JSONObject expected = new org.json.JSONObject(expectedText);
+        if (!expected.getString("binary_sha256").equals(sha256(readFile(binary))))
+            return "El binario traducido no coincide con el validado; no se ejecuta.";
+        long started = android.os.SystemClock.elapsedRealtime();
+        RunResult main = runHarness(binary, null), zero = runHarness(binary, "--virtual-zero"), x87 = runHarness(binary, "--x87-semantics");
+        String[][] faults = {{"--null-object", "70"}, {"--missing-timer", "74"}, {"--missing-virtual", "75"}, {"--null-virtual-object", "71"}};
+        int faultsOk = 0;
+        for (String[] f : faults) if (runHarness(binary, f[0]).exit == Integer.parseInt(f[1])) faultsOk++;
+        long elapsed = android.os.SystemClock.elapsedRealtime() - started;
+        boolean mainOk = main.exit == 0 && expected.getString("main_output_sha256").equals(main.sha256);
+        boolean zeroOk = zero.exit == 0 && expected.getString("zero_output_sha256").equals(zero.sha256);
+        boolean all = mainOk && zeroOk && x87.exit == 0 && faultsOk == faults.length;
+        return (all ? "CORRECTO" : "FALLO") + " · código traducido del juego ejecutado en ARM64 dentro de la app (" + elapsed + " ms)\n"
+            + "· Candidata de tiempo 0x6081a0 con 13 dependencias traducidas, 256 casos: " + (mainOk ? "salida idéntica a la validada frente a x86" : "salida distinta (código " + main.exit + ")") + "\n"
+            + "· Rama de argumento cero, 12 casos: " + (zeroOk ? "idéntica" : "distinta (código " + zero.exit + ")") + "\n"
+            + "· Semántica x87 en el proceso traducido: " + (x87.exit == 0 ? "correcta" : "fallo " + x87.exit) + "\n"
+            + "· Fallos controlados esperados: " + faultsOk + " de " + faults.length + "\n"
+            + "Datos sintéticos y funciones restantes simuladas: no es el arranque del juego.";
+    }
+    private static final class RunResult { int exit; String sha256; }
+    private RunResult runHarness(java.io.File binary, String argument) throws IOException, InterruptedException {
+        ProcessBuilder builder = argument == null ? new ProcessBuilder(binary.getAbsolutePath()) : new ProcessBuilder(binary.getAbsolutePath(), argument);
+        builder.redirectError(ProcessBuilder.Redirect.to(new java.io.File("/dev/null")));
+        Process process = builder.start();
+        MessageDigest digest;
+        try { digest = MessageDigest.getInstance("SHA-256"); } catch (NoSuchAlgorithmException e) { process.destroy(); throw new IOException(e); }
+        long total = 0;
+        try (InputStream in = process.getInputStream()) {
+            byte[] buffer = new byte[65536]; int count;
+            while ((count = in.read(buffer)) != -1) {
+                total += count;
+                if (total > 64L * 1024 * 1024) { process.destroyForcibly(); throw new IOException("salida demasiado grande"); }
+                digest.update(buffer, 0, count);
+            }
+        }
+        if (!process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) { process.destroyForcibly(); throw new IOException("tiempo agotado"); }
+        RunResult r = new RunResult(); r.exit = process.exitValue(); r.sha256 = hex(digest.digest()); return r;
+    }
+    private static byte[] readAll(InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[8192]; int count;
+        while ((count = in.read(buffer)) != -1) { out.write(buffer, 0, count); if (out.size() > 16 * 1024 * 1024) throw new IOException("archivo demasiado grande"); }
+        return out.toByteArray();
+    }
+    private static byte[] readFile(java.io.File file) throws IOException {
+        try (InputStream in = new java.io.FileInputStream(file)) { return readAll(in); }
+    }
+    private static String sha256(byte[] data) throws IOException {
+        try { return hex(MessageDigest.getInstance("SHA-256").digest(data)); }
+        catch (NoSuchAlgorithmException e) { throw new IOException(e); }
+    }
+    private static String hex(byte[] bytes) {
+        StringBuilder out = new StringBuilder();
+        for (byte b : bytes) out.append(String.format(java.util.Locale.ROOT, "%02x", b & 255));
+        return out.toString();
     }
     private void selectFolder() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);

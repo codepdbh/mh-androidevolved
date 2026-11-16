@@ -35,7 +35,8 @@ void sub_00482F20(void){if(MEM32(g_esp)!=0x5daaa8)exit(88);MEM32(0x8a000c)+=1;g_
 void sub_005DAA20(void){if(MEM32(g_esp)!=0x6083a9)exit(83);g_esp+=4;}
 void sub_005DAA50(void){if(MEM32(g_esp)!=0x6083ae)exit(83);g_esp+=4;}
 #endif
-void sub_00401030(void){uint32_t ret=MEM32(g_esp);if(ret!=0x604df0 && ret!=0x604e0f)exit(85);g_esp+=4;}
+/* Synthetic callee of the translated wrapper; no allocation or freeing. */
+void sub_00401B00(void){uint32_t arg=MEM32(g_esp+4);if(MEM32(g_esp)!=0x40103e||g_ecx!=0x67d000||(arg!=0x860000&&arg!=0x860100))exit(85);g_esp+=8;}
 void sub_004932F0(void){if(MEM32(g_esp)!=0x604e24)exit(85);g_esp+=4;}
 void sub_00493230(void){if(MEM32(g_esp)!=0x604e2e)exit(85);g_esp+=4;}
 static void fake_tick(void){uint32_t ret=MEM32(g_esp);if(ret!=0x6081b5 && ret!=0x608219)exit(84);g_eax=MEM32(0x810000);g_edx=g_eax+40;MEM32(0x810000)=g_edx;g_esp+=4;}
@@ -59,6 +60,7 @@ void sub_00401030(void);void sub_004932F0(void);void sub_00493230(void);
 #include "dependencies/dep_00648540.c"
 #include "dependencies/dep_005ea2b0_precise.c"
 #include "dependencies/dep_005daa50_precise.c"
+#include "dependencies/dep_00401030_precise.c"
 #endif
 /* x87 inputs per mode as exact float bit patterns: plain values, zero divisor in
  * the second division, negative/inexact values, zero divisors in both. The last

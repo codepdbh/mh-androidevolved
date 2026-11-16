@@ -1,5 +1,7 @@
 # Candidatos de llamadas de tiempo
 
+Actualización 2026-11-16: ver `docs/evidence/S25_TIME_CANDIDATE.md` para la validación vigente con trece dependencias reales en Windows y S25. La candidata `0x605750` se recuperó por separado dentro de una ventana de 584 bytes: 180 instrucciones, diez retornos y 26 sitios de llamada a nueve funciones. Se validaron estáticamente los destinos y retornos y compiló como objeto ARM64 con adaptadores comprobados. No se ha ejecutado ni integrado en el arnés; sus nueve destinos permanecen pendientes. Su alcance y función real en el juego no están demostrados.
+
 El análisis estático de la versión local encontró dos posibles llamadas indirectas a `GetTickCount`, en `0x4fb920` y `0x4fb934`. Una secuencia alineada candidata comienza en `0x4fb914`, pero incluye una llamada a `0x400080`, fuera de la sección de código habitual. Ni el límite real de la función ni su alcanzabilidad se han demostrado; no se ha conectado ni ejecutado esa secuencia y no se ha eludido ninguna protección.
 
 Entre siete referencias candidatas a `timeGetTime`, una secuencia de entrada posible en `0x6081a0` contiene llamadas en `0x6081af` y `0x608213`, con retornos en `0x6081b5` y `0x608219`. Son resultados de análisis estático y no acreditan que la función sea alcanzable o que sus límites sean correctos.

@@ -49,6 +49,12 @@ Se tradujeron `0x5daa50` y `0x5ea2b0` con dos reescrituras auditadas: cinco acce
 - Resultado en el S25 `SM-S938B`: 256 + 12 casos coinciden con Unicorn, incluidos `-inf` en ambas divisiones; fallos 70 / 74 / 75 / 71; limpieza confirmada. Windows x64 también coincidió.
 - Límites: no se generó ningún NaN; no se modelan la precisión extendida, los flags de estado ni las excepciones x87.
 
-## Pendiente: caso NaN
+## Sexta ejecución: caso NaN confirmado el 16 de noviembre
 
-El modo 3 usa ahora `inf/inf` en la primera división; Unicorn produce `0xffc00000`. La traducción pasa por `recomp/x87_semantics.h`. Windows x64 coincidió (256 + 12 casos). El binario ARM64 `6bc7b140c2eb9991fb8f33d47ed9aa09257ea84ed376a92987f7b31033e2560c` compiló, pero **no se ha ejecutado**: el S25 dejó de aparecer en ADB.
+El modo 3 usa ahora `inf/inf` en la primera división; Unicorn produce `0xffc00000`. La traducción pasa por `recomp/x87_semantics.h`. Windows x64 coincidió (256 + 12 casos). El 16 de noviembre se reconstruyó el binario ARM64 `6bc7b140c2eb9991fb8f33d47ed9aa09257ea84ed376a92987f7b31033e2560c`, registrando los hashes de sus 21 fuentes locales, y se ejecutó en el S25 SM-S938B. Coincidieron los 256 + 12 casos; pasaron las 12 comprobaciones x87 y los cuatro fallos esperados. Se confirmó la limpieza temporal. Los límites de precisión extendida, estado y excepciones x87 siguen vigentes; el arnés no es un juego funcional.
+
+## Séptima ejecución: envoltorio de cuatro instrucciones
+
+El envoltorio `0x401030` fue traducido e incorporado como decimotercera dependencia real. Su función interna `0x401b00` permanece simulada y no proporciona un asignador de memoria real. Una prueba aislada anterior cubrió 16 combinaciones de argumento y alineación en Windows.
+
+La validación completa pasó en Windows y en el S25: 256 + 12 casos, NaN, 12 comprobaciones x87 y cuatro fallos esperados; limpieza confirmada. SHA-256 ARM64: `4acdb1b726c1ec0dc49b38a5cf192fe3e4d4b8e911e06a0776bd05ffce72f75d`. El manifiesto registra las 22 fuentes locales; el resumen de la sesión está en `logs/time-validation-session.json`. La candidata principal sigue usando un sustituto para `0x605750`, además de otras funciones externas y virtuales; el juego no arranca.

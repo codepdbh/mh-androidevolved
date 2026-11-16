@@ -1,5 +1,11 @@
 # Problemas conocidos
 
+- El 16-11 el propietario autorizó omitir los umbrales de RAM libre (`MHAE_OWNER_RAM_OVERRIDE=1`, solo por variable de entorno y registrado en `logs/ram-override.log`). No está activo por defecto. Siguen los límites por proceso y un mínimo de 512 MiB. La APK con `libmhae_time_test.so` contiene código traducido del juego y es solo para uso privado.
+
+2026-11-16, actualización posterior: se ejecutó el arnés con NaN en el S25 y coincidieron los 256 + 12 casos; también pasaron 12 comprobaciones x87 y los cuatro fallos esperados. Queda resuelto el bloqueo de verificación ARM64 del NaN descrito debajo. Persisten los límites de precisión de la FPU y la falta de un runtime completo jugable.
+
+Actualización 2026-11-16: el S25 volvió a conectarse y se comprobó su modelo SM-S938B y la presencia de la carpeta de datos. El caso NaN sigue pendiente de una ejecución nueva: la RAM disponible del PC impidió iniciar los perfiles de compilación/prueba (mínimo 1536 MiB). El perfil ahora exige hashes del conjunto de fuentes locales, por lo que los manifiestos anteriores requieren recompilar.
+
 - Bloqueo actual: el S25 no aparece en `adb devices`, por lo que la candidata de tiempo con el caso NaN y las comprobaciones `--x87-semantics` no se han ejecutado en ARM64. Al reconectarlo: `python -c "import scripts.worksafe as w; w.build_time_candidate_arm64_test(); print(w.run_time_candidate_on_s25())"`. Mitigación preparada (sin verificar en ARM64): `recomp/x87_semantics.h` para el NaN indefinido.
 
 - PCRecomp traduce `fdivp` con una protección que devuelve el dividendo si el divisor es cero; x87 produce ±inf o NaN. Se corrigió solo en `0x5daa50`; cualquier otra traducción con `fdivp` necesita la misma revisión. La FPU se modela con `double` del host, no con precisión extendida de 80 bits ni el control de precisión que Direct3D suele fijar. Hipótesis sin verificar: un `0/0` produce en x87 el NaN indefinido negativo (`0xffc00000`) y en ARM64 el NaN por defecto positivo (`0x7fc00000`); las pruebas actuales no generan NaN.

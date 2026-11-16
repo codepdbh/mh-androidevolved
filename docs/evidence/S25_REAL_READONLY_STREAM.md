@@ -1,0 +1,11 @@
+# Lectura real mediante el envoltorio traducido — 16 de noviembre de 2026
+
+Se implementó `runtime/readonly_stream.c` y se conectó en un arnés aislado al envoltorio traducido `0x60ff60`, que llama a la entrada de ReadFile. El proveedor usa descriptores regulares de solo lectura, duplica el descriptor y emplea `pread` con posición independiente. Solo el arnés abre dos rutas fijas: su archivo temporal y `/sdcard/mh-androidevolved/manhunt.exe`; el proveedor no abre rutas ni escribe.
+
+En el S25 pasaron lecturas consecutivas con cuatro alineaciones, lectura parcial al final, EOF, petición vacía, independencia del descriptor prestado y su cierre, así como rechazos de salida inválida o superpuesta, OVERLAPPED, tamaño excesivo, descriptor inválido, pipe y descriptor con permiso de escritura. Se comprobó que el error de lectura conserva el búfer y la posición. El envoltorio también leyó las cabeceras MZ y PE de la copia del juego y comprobó EOF en su tamaño conocido. El archivo se trató como datos; no se ejecutó el juego.
+
+SHA-256 del binario de pruebas: `ac20ae9bb3f99a307edbc316275422b2f3f39d4d671800d7c5d8bc44617fd3aa`. Se comprobaron las fuentes locales antes y después de compilar y ejecutar. Los hashes del archivo temporal y de la copia del ejecutable coincidieron antes y después; el del ejecutable siguió siendo `5001b64f77690316330575fcfe6acd5c5115c5476c183ffec0d86779b0686b52`. La limpieza del binario, el archivo temporal y su directorio se confirmó. El informe local completo está en `private/analysis/candidate_time/dependencies/readonly_stream_device_report.json` y los registros en `logs/readonly-stream-*`.
+
+Un primer intento detectó que el caso que pretendía probar el límite de tamaño también superponía sus salidas; el proveedor rechazó la superposición primero. Se corrigió el caso para aislar cada condición, se reconstruyó y la repetición pasó. La limpieza también se confirmó en el intento fallido. El backend compiló por separado con `-Wall -Wextra -Werror`.
+
+Esto prueba un subconjunto síncrono con un único handle de prueba. No implementa toda la API de Windows, GetLastError, OVERLAPPED, una tabla general de handles ni resolución de nombres mediante SAF. El proveedor todavía no está integrado en la APK o en el arranque del juego.

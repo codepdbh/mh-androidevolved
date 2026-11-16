@@ -25,6 +25,8 @@ def main():
     if [x['address'] for x in x87_report['items']]!=['0x5daa50','0x5ea2b0'] or x87_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected x87 report')
     probe_report=json.loads((base/'dependencies/stack_probe_report.json').read_text())
     if probe_report['address']!='0x648540' or probe_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected stack probe report')
+    wrapper_report=json.loads((base/'dependencies/free_wrapper_report.json').read_text())
+    if wrapper_report['address']!='0x401030' or wrapper_report['input_sha256']!=EXPECTED:raise SystemExit('unexpected wrapper report')
     pe=pefile.PE(data=data,fast_load=True);page=pe.get_data(0x608000-pe.OPTIONAL_HEADER.ImageBase,0x1000)
     if len(page)!=0x1000:raise SystemExit('incomplete candidate page')
     cases=[]
@@ -47,7 +49,10 @@ def main():
         indirect_code=pe.get_data(0x604dc0-pe.OPTIONAL_HEADER.ImageBase,0x90)
         if len(indirect_code)!=0x90:raise SystemExit('incomplete indirect dependency')
         cpu.mem_write(0x604dc0,indirect_code)
-        for address in (0x401030,0x493230,0x4932f0,0x800200,0x800210):cpu.mem_write(address,b'\xc3')
+        wrapper=pe.get_data(0x401030-pe.OPTIONAL_HEADER.ImageBase,15)
+        if hashlib.sha256(wrapper).hexdigest()!=wrapper_report['bytes_sha256']:raise SystemExit('wrapper bytes differ')
+        cpu.mem_write(0x401030,wrapper);cpu.mem_write(0x401b00,b'\xc2\x04\x00')
+        for address in (0x493230,0x4932f0,0x800200,0x800210):cpu.mem_write(address,b'\xc3')
         setter=pe.get_data(0x604f30-pe.OPTIONAL_HEADER.ImageBase,10)
         if setter!=bytes.fromhex('8b442404894108c20400'):raise SystemExit('setter bytes differ')
         cpu.mem_write(0x604f30,setter)
@@ -110,6 +115,6 @@ def main():
                       'x87_tail_calls':struct.unpack('<I',cpu.mem_read(0x8a000c,4))[0],
                       'fp_top':(cpu.reg_read(UC_X86_REG_FPSW)>>11)&7})
     (base/'x86_short_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'candidate_source_sha256':report['source_sha256'],
-        'scope':'isolated candidate, twelve actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
+        'scope':'isolated candidate, thirteen actual dependencies, others synthetic; no game launch','cases':cases},indent=2)+'\n',encoding='utf-8')
     print(len(cases),'isolated x86 reference cases recorded')
 if __name__=='__main__':main()

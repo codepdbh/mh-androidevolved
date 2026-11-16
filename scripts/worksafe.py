@@ -6,7 +6,7 @@ Callers must never launch untrusted/GUI/game programs. No interactive mode exist
 from __future__ import annotations
 import ctypes as c
 from ctypes import wintypes as w
-import json, os, subprocess, uuid
+import json, os, subprocess, time, uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,7 +18,14 @@ def available_memory_mb():
         _fields_ = [('length',w.DWORD),('load',w.DWORD),('total_phys',c.c_ulonglong),('avail_phys',c.c_ulonglong),('total_page',c.c_ulonglong),('avail_page',c.c_ulonglong),('total_virtual',c.c_ulonglong),('avail_virtual',c.c_ulonglong),('avail_extended',c.c_ulonglong)]
     status=MEMORYSTATUS(); status.length=c.sizeof(status)
     if not c.windll.kernel32.GlobalMemoryStatusEx(c.byref(status)): raise c.WinError(c.get_last_error())
-    return status.avail_phys // (1024*1024)
+    actual=status.avail_phys // (1024*1024)
+    # Owner-authorized temporary override of the free-RAM thresholds (never set by default).
+    # Per-job memory caps, priority, affinity and deadlines still apply; below 512 MiB it is ignored.
+    if os.environ.get('MHAE_OWNER_RAM_OVERRIDE')=='1' and actual>=512:
+        log=ROOT/'logs'/'ram-override.log';log.parent.mkdir(exist_ok=True)
+        with log.open('a',encoding='utf-8') as f:f.write(f'{time.strftime("%Y-%m-%dT%H:%M:%S")} actual={actual}MiB thresholds bypassed by owner\n')
+        return max(actual,4096)
+    return actual
 
 def build_android():
     """One fixed offline build. Refuse to start under memory pressure."""
@@ -249,6 +256,336 @@ def inspect_time_dependencies():
     if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('time dependency inspection failed')
     return result
 
+def inspect_time_unresolved_low_memory():
+    """Stream the PE hash and decode fixed windows within a 128 MiB job."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for bounded static windows')
+    result=_run_job([sys.executable,str(ROOT/'tools/inspect_time_unresolved.py')],30,'time-unresolved-low-memory',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('bounded static inspection failed; inspect logs')
+    return result
+
+def analyze_time_recorded_cfg_low_memory():
+    """Walk four recorded instruction windows, with opaque callees and 64 MiB."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<256:raise WorkSafeError('insufficient RAM for recorded-window analysis')
+    result=_run_job([sys.executable,str(ROOT/'tools/analyze_time_recorded_cfg.py')],15,'time-recorded-cfg',cfg,max_processes=1,memory_mb=64)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('recorded-window analysis failed')
+    return result
+
+def lift_time_free_wrapper_low_memory():
+    """Lift four fixed instructions in a limited process, no image-wide analysis."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for tiny translation')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_free_wrapper.py')],30,'time-free-wrapper-lift',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('four-instruction translation failed; inspect logs')
+    return result
+
+def lift_time_loader_low_memory():
+    """Lift only a fixed 584-byte candidate window, without image-wide analysis."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for bounded translation')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_loader_window.py')],30,'time-loader-window-lift',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('bounded loader translation failed; inspect logs')
+    return result
+
+def lift_time_loader_helpers_low_memory():
+    """Translate three fixed tiny windows, within a 128 MiB job."""
+    import sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for bounded helpers')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_time_loader_helpers.py')],30,'time-loader-helpers-lift',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('helper translation failed; inspect logs')
+    return result
+
+def prepare_file_lifecycle_low_memory():
+    """Translate and assemble three exact private lifecycle wrapper windows."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for lifecycle translation')
+    result=_run_job([sys.executable,str(ROOT/'tools/lift_file_lifecycle.py')],30,'file-lifecycle-lift',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('lifecycle translation failed; inspect logs')
+    folder=ROOT/'private/analysis/candidate_time/dependencies';report=json.loads((folder/'file_lifecycle_report.json').read_text());parts=[]
+    if [i['address'] for i in report['items']]!=['0x60feb0','0x60fec0','0x60ff40']:raise WorkSafeError('unexpected lifecycle set')
+    for item in report['items']:
+        if item['source'] not in ('dep_0060feb0_precise.c','dep_0060fec0_precise.c','dep_0060ff40_precise.c'):raise WorkSafeError('unexpected lifecycle filename')
+        source=(folder/item['source']).read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(source.encode()).hexdigest()!=item['adapted_sha256']:raise WorkSafeError('lifecycle source changed')
+        parts.append(source)
+    (folder/'file_lifecycle_unit.c').write_text('\n'.join(parts)+'\n',encoding='utf-8');return result
+
+def compile_time_loader_low_memory():
+    """Compile just the bounded 180-instruction candidate, never link or run it."""
+    import hashlib,struct
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for bounded object compilation')
+    folder=ROOT/'private/analysis/candidate_time/dependencies'
+    report=json.loads((folder/'loader_report.json').read_text());source=(folder/'dep_00605750_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if report['address']!='0x605750' or hashlib.sha256(source.encode()).hexdigest()!=report['adapted_sha256']:raise WorkSafeError('bounded candidate source changed')
+    unit=folder/'loader_checked_unit.c';unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    output=folder/'loader-checked-arm64.o'
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(output)]
+    result=_run_job(argv,30,'time-loader-window-compile',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('bounded candidate compilation failed')
+    data=output.read_bytes()
+    if len(data)<64 or data[:6]!=b'\x7fELF\x02\x01' or struct.unpack_from('<HH',data,16)!=(1,183):raise WorkSafeError('unexpected ARM64 relocatable object format')
+    (folder/'loader_object_report.json').write_text(json.dumps({'architecture':'AArch64','format':'ELF64 relocatable','sha256':hashlib.sha256(data).hexdigest(),
+        'source_sha256':report['adapted_sha256'],'size':len(data),'limitations':['not linked','not executed','nine direct callees unresolved','not integrated in harness or game']},indent=2)+'\n',encoding='utf-8')
+    return result
+
+def compile_time_free_wrapper_low_memory():
+    """Compile only the four-instruction private wrapper, within 128 MiB."""
+    import hashlib,re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for tiny wrapper compilation')
+    folder=ROOT/'private/analysis/candidate_time/dependencies'
+    report=json.loads((folder/'free_wrapper_report.json').read_text())
+    source=(folder/'dep_00401030_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if report['address']!='0x401030' or hashlib.sha256(source.encode()).hexdigest()!=report['adapted_sha256']:raise WorkSafeError('free wrapper source hash mismatch')
+    operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',source))
+    if not operations.issubset({'MEM32','PUSH32','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported wrapper operations')
+    unit=folder/'free_wrapper_unit.c'
+    unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+source+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(folder/'free-wrapper-arm64.o')]
+    result=_run_job(argv,30,'time-free-wrapper-compile',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('tiny wrapper compilation failed')
+    return result
+
+def test_time_free_wrapper_low_memory():
+    """Build and run sixteen tiny cases with a synthetic allocator callee."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<768:raise WorkSafeError('insufficient RAM for tiny host test')
+    compile_time_free_wrapper_low_memory()
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits/10';version='10.0.26100.0'
+    cl=vs/'bin/Hostx64/x64/cl.exe';inc=[vs/'include',kits/'Include'/version/'ucrt',kits/'Include'/version/'shared',kits/'Include'/version/'um']
+    lib=[vs/'lib/x64',kits/'Lib'/version/'ucrt/x64',kits/'Lib'/version/'um/x64']
+    if not cl.is_file() or not all(p.is_dir() for p in inc+lib):raise WorkSafeError('host compiler or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,inc));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    folder=ROOT/'private/analysis/candidate_time/dependencies';exe=folder/'free-wrapper-test.exe'
+    argv=[str(cl),'/nologo','/Od','/std:c11','/I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'/I',str(ROOT/'recomp'),'/I',str(ROOT/'runtime'),'/I',str(folder),'/Fo'+str(folder/'free-wrapper-test.obj'),'/Fe'+str(exe),str(ROOT/'tests/time_free_wrapper_native.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,30,'time-free-wrapper-host-build',cfg,max_processes=4,memory_mb=256,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('tiny host compilation failed')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for tiny execution')
+    result=_run_job([str(exe)],15,'time-free-wrapper-host-test',cfg,max_processes=1,memory_mb=64)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('isolated wrapper test failed')
+    return result
+
+def test_time_loader_helpers_low_memory():
+    """Compile three tiny private helpers for ARM64 and test with mocked I/O."""
+    import hashlib,struct
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<768:raise WorkSafeError('insufficient RAM for small helper tests')
+    folder=ROOT/'private/analysis/candidate_time/dependencies';report=json.loads((folder/'loader_helpers_report.json').read_text())
+    if {i['address'] for i in report['items']}!={'0x605e40','0x60fea0','0x60ff60'}:raise WorkSafeError('unexpected helper set')
+    sources=[]
+    for item in report['items']:
+        if item['source'] not in ('dep_00605e40_precise.c','dep_0060fea0_precise.c','dep_0060ff60_precise.c'):raise WorkSafeError('unexpected helper source')
+        source=(folder/item['source']).read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(source.encode()).hexdigest()!=item['adapted_sha256']:raise WorkSafeError('helper source hash mismatch')
+        sources.append(source)
+    unit=folder/'loader_helpers_unit.c';unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+'\n'.join(sources)+'\n',encoding='utf-8')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    obj=folder/'loader-helpers-arm64.o';includes=[ROOT/'private/pcrecomp/runtime/recomp32',ROOT/'recomp',ROOT/'runtime']
+    args=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11',*[a for p in includes for a in ('-I',str(p))],'-c',str(unit),'-o',str(obj)]
+    built=_run_job(args,30,'loader-helpers-arm64-build',cfg,max_processes=1,memory_mb=128)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('helper ARM64 compilation failed')
+    data=obj.read_bytes()
+    if len(data)<64 or data[:6]!=b'\x7fELF\x02\x01' or struct.unpack_from('<HH',data,16)!=(1,183):raise WorkSafeError('unexpected helper object format')
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits/10';v='10.0.26100.0';cl=vs/'bin/Hostx64/x64/cl.exe'
+    inc=[vs/'include',kits/'Include'/v/'ucrt',kits/'Include'/v/'shared',kits/'Include'/v/'um'];lib=[vs/'lib/x64',kits/'Lib'/v/'ucrt/x64',kits/'Lib'/v/'um/x64']
+    if not cl.is_file() or not all(p.is_dir() for p in inc+lib):raise WorkSafeError('host compiler or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,inc));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    exe=folder/'loader-helpers-test.exe'
+    args=[str(cl),'/nologo','/Od','/std:c11',*[a for p in includes+[folder] for a in ('/I',str(p))],'/Fo'+str(folder/'loader-helpers-test.obj'),'/Fe'+str(exe),str(ROOT/'tests/time_loader_helpers_native.c'),'/link','/INCREMENTAL:NO']
+    host=_run_job(args,30,'loader-helpers-host-build',cfg,max_processes=4,memory_mb=256,env=env)
+    if host['returncode']!=0 or host['timed_out']:raise WorkSafeError('helper host compilation failed')
+    tests={}
+    for mode,expected in (('normal',0),('missing-readfile',74),('bad-object',70)):
+        if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for helper execution')
+        result=_run_job([str(exe),*([] if mode=='normal' else ['--'+mode])],15,'loader-helpers-'+mode,cfg,max_processes=1,memory_mb=64)
+        if result['returncode']!=expected or result['timed_out']:raise WorkSafeError('helper test failed: '+mode)
+        tests[mode]=result
+    return {'arm64':built,'host':host,'tests':tests}
+
+def run_time_loader_helpers_s25():
+    """Build the tiny helper harness, verify, run and clean only its own file."""
+    import base64,hashlib,re,secrets,textwrap
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM for helper ARM64 link')
+    folder=ROOT/'private/analysis/candidate_time/dependencies';entry=ROOT/'tests/time_loader_helpers_native.c'
+    sources=_time_harness_input_hashes(entry)
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    clang=ndk/'bin/clang.exe';adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
+    if not clang.is_file() or not adb.is_file():raise WorkSafeError('Android tools missing')
+    binary_path=folder/'loader-helpers-device-test'
+    args=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',
+          '-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-I',str(folder),str(entry),'-o',str(binary_path)]
+    built=_run_job(args,60,'loader-helpers-device-build',cfg,max_processes=4,memory_mb=256)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('helper device build failed')
+    if sources!=_time_harness_input_hashes(entry):raise WorkSafeError('helper sources changed during compilation')
+    payload=binary_path.read_bytes()
+    if len(payload)>1024*1024 or payload[:6]!=b'\x7fELF\x02\x01' or payload[16:20]!=b'\x03\x00\xb7\x00':raise WorkSafeError('unexpected helper device binary')
+    digest=hashlib.sha256(payload).hexdigest()
+    manifest={'sha256':digest,'source_inputs':sources,'scope':'private translated helpers, synthetic ReadFile; no game launch'}
+    (folder/'loader_helpers_device_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
+    listing=_run_job([str(adb),'devices','-l'],15,'loader-helpers-device-list',cfg,max_processes=4,memory_mb=128)
+    if listing['returncode']!=0 or listing['timed_out']:raise WorkSafeError('helper device listing failed')
+    lines=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()[1:]
+    ready=[p[0] for line in lines if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8);encoded='\n'.join(textwrap.wrap(base64.b64encode(payload).decode('ascii'),76))
+    script=('model=$(getprop ro.product.model)\ncase "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 80;; esac\n'
+            'case ",$(getprop ro.product.cpu.abilist)," in *,arm64-v8a,*) ;; *) exit 81;; esac\n'
+            'printf "MHAE_MODEL=%s\\n" "$model"\n'+f'd={remote}\np="$d/loader_helpers"\n'+
+            'mkdir "$d" || exit 82\nfinish() { rc=$?; trap - EXIT; if rm -f "$p" && rmdir "$d"; then echo MHAE_CLEANUP_OK; else rc=91; fi; exit "$rc"; }\ntrap finish EXIT\ntrap "exit 93" HUP INT TERM\n'
+            'base64 -d > "$p" <<\'MHAE_PAYLOAD\'\n'+encoded+'\nMHAE_PAYLOAD\n'
+            'set -- $(sha256sum "$p")\n'+f'[ "${{1:-}}" = "{digest}" ] || exit 83\n'+
+            'chmod 700 "$p" || exit 84\n"$p" || exit 85\n'
+            '"$p" --missing-readfile; rc=$?\n[ "$rc" -eq 74 ] || exit 86\n'
+            '"$p" --bad-object; rc=$?\n[ "$rc" -eq 70 ] || exit 87\necho MHAE_TESTS_PASSED\n').encode('ascii')
+    shell=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Git/bin/sh.exe'
+    if not shell.is_file():raise WorkSafeError('Git shell missing for syntax check')
+    syntax=_run_job([str(shell),'-n'],15,'loader-helpers-device-shell-check',cfg,max_processes=2,memory_mb=128,input_bytes=script)
+    if syntax['returncode']!=0 or syntax['timed_out']:raise WorkSafeError('helper device script syntax failed')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM before helper device session')
+    attempt=ROOT/'logs/loader-helpers-device-attempt.json'
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'})+'\n',encoding='utf-8')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],60,'loader-helpers-device-session',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace');cleaned='MHAE_CLEANUP_OK' in output
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'confirmed' if cleaned else 'unconfirmed'})+'\n',encoding='utf-8')
+    if result['returncode']!=0 or result['timed_out'] or not cleaned or 'MHAE_TESTS_PASSED' not in output:raise WorkSafeError('helper device tests failed or cleanup unconfirmed')
+    if sources!=_time_harness_input_hashes(entry):raise WorkSafeError('helper source changed during device tests; review evidence')
+    return {'sha256':digest,'tests':'64 helper checks, missing ReadFile and bad object passed','cleanup':'confirmed','scope':'ReadFile simulated; game unavailable'}
+
+def run_real_readonly_stream_s25(with_handles=False,build_only=False):
+    """Read only a private fixture and the known copied PE through the wrapper."""
+    import base64,hashlib,re,secrets,textwrap
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if not isinstance(with_handles,bool) or not isinstance(build_only,bool):raise WorkSafeError('invalid read-only test profile')
+    if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM for read-only stream test')
+    if with_handles:prepare_file_lifecycle_low_memory()
+    folder=ROOT/'private/analysis/candidate_time/dependencies';entry=ROOT/('tests/time_file_handles_native.c' if with_handles else 'tests/time_readonly_stream_native.c')
+    label='readonly-handles' if with_handles else 'readonly-stream'
+    report=json.loads((folder/'loader_helpers_report.json').read_text());parts=[]
+    if [x['address'] for x in report['items']]!=['0x605e40','0x60fea0','0x60ff60']:raise WorkSafeError('unexpected helper set')
+    for item in report['items']:
+        if item['source'] not in ('dep_00605e40_precise.c','dep_0060fea0_precise.c','dep_0060ff60_precise.c'):raise WorkSafeError('unexpected helper filename')
+        content=(folder/item['source']).read_text(encoding='utf-8').removesuffix('\n')
+        if hashlib.sha256(content.encode()).hexdigest()!=item['adapted_sha256']:raise WorkSafeError('helper source changed')
+        parts.append(content)
+    expected='#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+'\n'.join(parts)+'\n'
+    if (folder/'loader_helpers_unit.c').read_text(encoding='utf-8')!=expected:raise WorkSafeError('helper unit changed; rebuild helpers first')
+    sources=_time_harness_input_hashes(entry)
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    clang=ndk/'bin/clang.exe';adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
+    if not clang.is_file() or not adb.is_file():raise WorkSafeError('Android tools missing')
+    binary_path=folder/(label+'-device-test')
+    args=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie','-Wall','-Wextra',
+          '-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-I',str(folder),str(entry),'-o',str(binary_path)]
+    built=_run_job(args,60,label+'-device-build',cfg,max_processes=4,memory_mb=256)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('read-only stream compilation failed; inspect logs')
+    if sources!=_time_harness_input_hashes(entry):raise WorkSafeError('read-only stream sources changed while compiling')
+    payload=binary_path.read_bytes()
+    if len(payload)>1024*1024 or payload[:6]!=b'\x7fELF\x02\x01' or payload[16:20]!=b'\x03\x00\xb7\x00':raise WorkSafeError('unexpected test binary')
+    digest=hashlib.sha256(payload).hexdigest();fixture=b'0123456789abcdefghijklmnopqrstuv';fixture_hash=hashlib.sha256(fixture).hexdigest()
+    if build_only:return {'build':built,'sha256':digest,'source_inputs':sources,'device_execution':'not requested'}
+    game_hash='5001b64f77690316330575fcfe6acd5c5115c5476c183ffec0d86779b0686b52'
+    listing=_run_job([str(adb),'devices','-l'],15,label+'-device-list',cfg,max_processes=4,memory_mb=128)
+    if listing['returncode']!=0 or listing['timed_out']:raise WorkSafeError('device listing failed')
+    lines=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').splitlines()[1:]
+    ready=[p[0] for line in lines if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    remote='/data/local/tmp/mhae_'+secrets.token_hex(8);encoded='\n'.join(textwrap.wrap(base64.b64encode(payload).decode('ascii'),76))
+    cleanup=('rm -f "$p" "$f" "$d/nested/data" "$d/link" "$d/linked" "$d/pipe" && { [ ! -d "$d/nested" ] || rmdir "$d/nested"; } && rmdir "$d"' if with_handles else 'rm -f "$p" "$f" && rmdir "$d"')
+    prepare=('mkdir "$d/nested" && cat "$f" > "$d/nested/data" && ln -s fixture "$d/link" && ln -s nested "$d/linked" || exit 90\nif ! mkfifo "$d/pipe"; then echo MHAE_FIFO_UNAVAILABLE; fi\n' if with_handles else '')
+    invoke='"$p" "$d" || exit 87\n' if with_handles else '"$p" "$f" || exit 87\n'
+    nested_check=('set -- $(sha256sum "$d/nested/data")\n'+f'[ "${{1:-}}" = "{fixture_hash}" ] || exit 88\n') if with_handles else ''
+    script=('model=$(getprop ro.product.model)\ncase "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 80;; esac\n'
+            'case ",$(getprop ro.product.cpu.abilist)," in *,arm64-v8a,*) ;; *) exit 81;; esac\n'
+            'game=/sdcard/mh-androidevolved/manhunt.exe\nset -- $(sha256sum "$game")\n'+f'[ "${{1:-}}" = "{game_hash}" ] || exit 82\n'+
+            'printf "MHAE_MODEL=%s\\n" "$model"\n'+f'd={remote}\np="$d/read_test"\nf="$d/fixture"\n'+
+            'mkdir "$d" || exit 83\nfinish() { rc=$?; trap - EXIT; if '+cleanup+'; then echo MHAE_CLEANUP_OK; else rc=91; fi; exit "$rc"; }\ntrap finish EXIT\ntrap "exit 93" HUP INT TERM\n'
+            'base64 -d > "$p" <<\'MHAE_PAYLOAD\'\n'+encoded+'\nMHAE_PAYLOAD\n'
+            'set -- $(sha256sum "$p")\n'+f'[ "${{1:-}}" = "{digest}" ] || exit 84\n'+
+            f'printf %s {base64.b64encode(fixture).decode("ascii")} | base64 -d > "$f"\n'+
+            'set -- $(sha256sum "$f")\n'+f'[ "${{1:-}}" = "{fixture_hash}" ] || exit 85\n'+
+            prepare+'chmod 700 "$p" || exit 86\n'+invoke+nested_check+
+            'set -- $(sha256sum "$f")\n'+f'[ "${{1:-}}" = "{fixture_hash}" ] || exit 88\n'+
+            'set -- $(sha256sum "$game")\n'+f'[ "${{1:-}}" = "{game_hash}" ] || exit 89\n'+
+            'echo MHAE_SOURCES_UNCHANGED\necho MHAE_TESTS_PASSED\n').encode('ascii')
+    shell=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Git/bin/sh.exe'
+    if not shell.is_file():raise WorkSafeError('Git shell missing')
+    checked=_run_job([str(shell),'-n'],15,label+'-shell-check',cfg,max_processes=2,memory_mb=128,input_bytes=script)
+    if checked['returncode']!=0 or checked['timed_out']:raise WorkSafeError('read-only device script syntax failed')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM before device read-only test')
+    attempt=ROOT/'logs'/(label+'-device-attempt.json');attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'})+'\n',encoding='utf-8')
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],60,label+'-device-session',cfg,max_processes=4,memory_mb=256,input_bytes=script)
+    output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace');cleaned='MHAE_CLEANUP_OK' in output
+    attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'confirmed' if cleaned else 'unconfirmed'})+'\n',encoding='utf-8')
+    if result['returncode']!=0 or result['timed_out'] or not cleaned or 'MHAE_TESTS_PASSED' not in output:raise WorkSafeError('real read-only stream device test failed; inspect logs')
+    if sources!=_time_harness_input_hashes(entry):raise WorkSafeError('read-only stream source changed during test')
+    evidence={'sha256':digest,'source_inputs':sources,'game_sha256_before_after':game_hash,'fixture_sha256_before_after':fixture_hash,
+              'tests':'real relative opens and handle reads passed' if with_handles else 'real file reads through translated wrapper passed','cleanup':'confirmed',
+              'scope':'rooted read-only paths and generation handles; no game execution' if with_handles else 'read-only subset, one test handle; no game execution'}
+    evidence['skipped']=['FIFO fixture blocked by device policy'] if 'MHAE_FIFO_UNAVAILABLE' in output else []
+    (folder/('readonly_handles_device_report.json' if with_handles else 'readonly_stream_device_report.json')).write_text(json.dumps(evidence,indent=2)+'\n',encoding='utf-8');return evidence
+
+def check_readonly_stream_arm64(component='stream'):
+    """Compile the own-code backend alone with strict warnings and low memory."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if component not in ('stream','handles','path'):raise WorkSafeError('unknown read-only component')
+    if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for backend compilation')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    clang=ndk/'bin/clang.exe';out=ROOT/'build/android-native-check';out.mkdir(parents=True,exist_ok=True)
+    if not clang.is_file():raise WorkSafeError('NDK clang missing')
+    args=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'runtime'),'-c',str(ROOT/'runtime'/('readonly_'+component+'.c')),'-o',str(out/('readonly_'+component+'.o'))]
+    result=_run_job(args,30,'readonly-'+component+'-strict-compile',cfg,max_processes=1,memory_mb=128)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('backend strict compilation failed; inspect logs')
+    return result
+
+def test_readonly_path_host():
+    """Compile and exercise path normalization without device or file access."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<768:raise WorkSafeError('insufficient RAM for path tests')
+    out=ROOT/'build/readonly-path-check';out.mkdir(parents=True,exist_ok=True)
+    unit=out/'path_test_unit.c';unit.write_text('#include "'+(ROOT/'runtime/readonly_path.c').as_posix()+'"\n#include "'+(ROOT/'tests/test_readonly_path.c').as_posix()+'"\n',encoding='utf-8')
+    vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231'
+    kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits/10';v='10.0.26100.0';cl=vs/'bin/Hostx64/x64/cl.exe'
+    inc=[vs/'include',kits/'Include'/v/'ucrt',kits/'Include'/v/'shared',kits/'Include'/v/'um'];lib=[vs/'lib/x64',kits/'Lib'/v/'ucrt/x64',kits/'Lib'/v/'um/x64']
+    if not cl.is_file() or not all(p.is_dir() for p in inc+lib):raise WorkSafeError('host compiler or SDK missing')
+    env=os.environ.copy();env['INCLUDE']=os.pathsep.join(map(str,inc));env['LIB']=os.pathsep.join(map(str,lib));env['PATH']=str(cl.parent)+os.pathsep+env.get('PATH','')
+    exe=out/'readonly-path-test.exe'
+    args=[str(cl),'/nologo','/Od','/std:c11','/I',str(ROOT/'runtime'),'/Fo'+str(out/'test.obj'),'/Fe'+str(exe),str(unit),'/link','/INCREMENTAL:NO']
+    built=_run_job(args,30,'readonly-path-host-build',cfg,max_processes=4,memory_mb=256,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('path tests compilation failed')
+    result=_run_job([str(exe)],15,'readonly-path-host-test',cfg,max_processes=1,memory_mb=64)
+    if result['returncode']!=0 or result['timed_out']:raise WorkSafeError('path tests failed')
+    return result
+
 def lift_time_dependencies():
     """Lift only three fixed, statically checked tiny dependencies."""
     import sys
@@ -375,6 +712,9 @@ def prepare_time_copy_precise():
 def _check_time_harness_sources(base):
     """Verify hashes of every private translated source the time harness includes."""
     import hashlib
+    wrapper_report=json.loads((base/'dependencies/free_wrapper_report.json').read_text())
+    wrapper=(base/'dependencies/dep_00401030_precise.c').read_text(encoding='utf-8').removesuffix('\n')
+    if wrapper_report['address']!='0x401030' or hashlib.sha256(wrapper.encode()).hexdigest()!=wrapper_report['adapted_sha256']:raise WorkSafeError('wrapper source hash mismatch')
     dep_report=json.loads((base/'dependencies/report.json').read_text())
     if {x['address'] for x in dep_report['items']}!={'0x426ef0','0x481330','0x608410'}:raise WorkSafeError('unexpected dependency set')
     for item in dep_report['items']:
@@ -417,6 +757,7 @@ def compare_time_candidate_native():
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
     prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency();lift_time_memcpy_dependency();lift_time_stack_probe();lift_time_x87_dependency()
+    lift_time_free_wrapper_low_memory()
     vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231'
     kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits/10';version='10.0.26100.0'
     cl=vs/'bin/Hostx64/x64/cl.exe';inc=[vs/'include',kits/'Include'/version/'ucrt',kits/'Include'/version/'shared',kits/'Include'/version/'um']
@@ -461,6 +802,30 @@ def compare_time_indirect_zero():
 def _time_arm64_paths():
     base=ROOT/'private/analysis/candidate_time';return base,base/'android'/'time_test'
 
+def _time_harness_input_hashes(entry=None):
+    """Hash the workspace-local quoted-include graph, including inactive arms.
+
+    This is conservative: changing an unused local include also requires a
+    rebuild. SDK system headers and compiler identity are not covered here.
+    """
+    import hashlib,re
+    root=ROOT.resolve();base=root/'private/analysis/candidate_time'
+    search=[root/'private/pcrecomp/runtime/recomp32',root/'recomp',root/'runtime',base,base/'dependencies']
+    pending=[root/'tests/time_candidate_native.c' if entry is None else Path(entry)];seen={}
+    while pending:
+        path=pending.pop().resolve()
+        if not path.is_relative_to(root):raise WorkSafeError('time harness include outside workspace')
+        name=path.relative_to(root).as_posix()
+        if name in seen:continue
+        if len(seen)>=256 or not path.is_file():raise WorkSafeError('time harness include graph invalid')
+        data=path.read_bytes();seen[name]=hashlib.sha256(data).hexdigest()
+        for include in re.findall(r'^\s*#\s*include\s*"([^"\r\n]+)"',data.decode('utf-8'),re.MULTILINE):
+            candidates=[path.parent/include,*[directory/include for directory in search]]
+            found=next((p for p in candidates if p.is_file()),None)
+            if found is None:raise WorkSafeError('local time harness include missing: '+include)
+            pending.append(found)
+    return dict(sorted(seen.items()))
+
 def build_time_candidate_arm64_test():
     """Cross-compile the isolated time harness and six translated dependencies.
 
@@ -471,23 +836,27 @@ def build_time_candidate_arm64_test():
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
     prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency();lift_time_memcpy_dependency();lift_time_stack_probe();lift_time_x87_dependency()
+    lift_time_free_wrapper_low_memory()
     base,out=_time_arm64_paths();_check_time_harness_sources(base)
     ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     out.parent.mkdir(parents=True,exist_ok=True)
+    source_inputs=_time_harness_input_hashes()
     if available_memory_mb()<1536:raise WorkSafeError('insufficient RAM for ARM64 time harness compilation')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie','-DMH_REAL_SMALL_DEPS',
           '-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-I',str(base),
           str(ROOT/'tests/time_candidate_native.c'),'-o',str(out)]
     built=_run_job(argv,120,'time-arm64-build',cfg,max_processes=4,memory_mb=512)
     if built['returncode']!=0 or built['timed_out']:return {'build':built,'manifest':None}
+    if _time_harness_input_hashes()!=source_inputs:raise WorkSafeError('time harness inputs changed during compilation; rebuild required')
     data=out.read_bytes()
     # ELF64, little-endian, ET_DYN (PIE), EM_AARCH64.
     if data[:4]!=b'\x7fELF' or data[4]!=2 or data[5]!=1 or int.from_bytes(data[16:18],'little')!=3 or int.from_bytes(data[18:20],'little')!=183:
         raise WorkSafeError('time harness is not an ARM64 PIE ELF')
     if len(data)>4*1024*1024:raise WorkSafeError('time harness larger than expected')
     manifest={'abi':'arm64-v8a','name':'time_test','sha256':hashlib.sha256(data).hexdigest(),'size':len(data),
-              'harness_sha256':hashlib.sha256((ROOT/'tests/time_candidate_native.c').read_bytes()).hexdigest()}
+              'harness_sha256':hashlib.sha256((ROOT/'tests/time_candidate_native.c').read_bytes()).hexdigest(),
+              'source_inputs':source_inputs}
     (out.parent/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
     return {'prepare':prepared,'copy_prepare':copy_prepared,'indirect_prepare':indirect_prepared,'build':built,'manifest':manifest}
 
@@ -550,6 +919,8 @@ def run_time_candidate_on_s25():
         raise WorkSafeError('time harness manifest, hash or size mismatch')
     if hashlib.sha256((ROOT/'tests/time_candidate_native.c').read_bytes()).hexdigest()!=manifest.get('harness_sha256'):
         raise WorkSafeError('harness source changed since ARM64 build')
+    if manifest.get('source_inputs')!=_time_harness_input_hashes():
+        raise WorkSafeError('time harness inputs changed or unrecorded; rebuild before device upload')
     listing=_run_job([str(adb),'devices','-l'],15,'device-time-list',cfg,max_processes=4,memory_mb=256)
     if listing['timed_out'] or listing['returncode']!=0:raise WorkSafeError('ADB device listing failed')
     text=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
@@ -571,14 +942,23 @@ def run_time_candidate_on_s25():
     attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':cleanup},indent=2)+'\n',encoding='utf-8')
     if result['timed_out'] or result['returncode']!=0 or cleanup!='confirmed' or 'MHAE_TESTS_PASSED' not in output:
         raise WorkSafeError('time harness session failed or cleanup unconfirmed; inspect device-time logs')
-    paths={}
+    paths={};output_hashes={}
     for name,body in _split_time_device_output(output).items():
         paths[name]=ROOT/'logs'/f'time-arm64-{name.lower()}.jsonl';paths[name].write_text(body,encoding='utf-8')
+        output_hashes[name.lower()]=hashlib.sha256(body.encode('utf-8')).hexdigest()  # exact LF stdout bytes
     compared=_run_job([sys.executable,str(ROOT/'tests/compare_time_native.py'),str(paths['MAIN']),'android-arm64'],60,'time-arm64-compare',cfg,max_processes=1,memory_mb=512)
     zero=_run_job([sys.executable,str(ROOT/'tests/compare_time_indirect_zero.py'),str(paths['ZERO']),'android-arm64'],30,'time-arm64-zero-compare',cfg,max_processes=1,memory_mb=256)
     models=re.findall(r'^MHAE_MODEL=(\S+)\s*$',output,re.MULTILINE)
+    passed=all(r['returncode']==0 and not r['timed_out'] for r in (compared,zero))
+    record=binary_path.parent/'validated.json'
+    if passed:
+        # Lets the diagnostic APK check that in-app runs reproduce this S25-validated output.
+        record.write_text(json.dumps({'binary_sha256':digest,'model':models[0] if len(models)==1 else None,
+            'main_output_sha256':output_hashes['main'],'zero_output_sha256':output_hashes['zero'],
+            'compared_against':'Unicorn x86 reference (tests/compare_time_native.py, tests/compare_time_indirect_zero.py)'},indent=2)+'\n',encoding='utf-8')
+    elif record.is_file():record.unlink()
     return {'model':models[0] if len(models)==1 else None,'sha256':digest,'cleanup':cleanup,'faults':'matched',
-            'comparison':compared,'zero_comparison':zero,'passed':all(r['returncode']==0 and not r['timed_out'] for r in (compared,zero))}
+            'comparison':compared,'zero_comparison':zero,'passed':passed}
 
 def lift_game_candidate(x87=False):
     """Analyze an ordinary .text candidate; generated source remains private."""
@@ -1010,7 +1390,8 @@ def build_diagnostic_apk():
     lib=ROOT/'build/android-cmake-check/libmh_runtime.so'; src=ROOT/'android/app/src/main'
     if not all(p.is_file() for p in (java,android,key,aapt,align,d8,signer,lib)):
         raise WorkSafeError('diagnostic build prerequisites missing')
-    native_sources=[src/'cpp/native_diagnostics.c',*list((ROOT/'runtime').glob('*.c')),*list((ROOT/'runtime').glob('*.h'))]
+    native_sources=[src/'cpp/native_diagnostics.c',src/'cpp/native_selftest.c',src/'cpp/CMakeLists.txt',ROOT/'tests/test_x87_semantics.c',
+                    *list((ROOT/'runtime').glob('*.c')),*list((ROOT/'runtime').glob('*.h')),*list((ROOT/'recomp').glob('*.h'))]
     if any(p.stat().st_mtime>lib.stat().st_mtime for p in native_sources): raise WorkSafeError('native library may be stale; rebuild it first')
     def run(argv,name,seconds=120,memory=512):
         if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM; diagnostic build paused')
@@ -1031,13 +1412,24 @@ def build_diagnostic_apk():
     classes=sorted((ROOT/'build/android-java-check').rglob('*.class'))
     if not classes:raise WorkSafeError('no compiled Java classes')
     run([str(java),'-Xmx256m','-Djava.awt.headless=true','-cp',str(d8),'com.android.tools.r8.D8','--min-api','29','--output',str(out),*[str(p) for p in classes]],'diagnostic-d8')
+    # Optional private payload: the translated time harness, only when its exact binary passed on the S25.
+    import hashlib
+    harness=ROOT/'private/analysis/candidate_time/android/time_test';validated=harness.parent/'validated.json';translated=None
+    if harness.is_file() and validated.is_file():
+        record=json.loads(validated.read_text(encoding='utf-8'))
+        if hashlib.sha256(harness.read_bytes()).hexdigest()==record.get('binary_sha256'):
+            translated={'binary_sha256':record['binary_sha256'],'main_output_sha256':record['main_output_sha256'],'zero_output_sha256':record['zero_output_sha256']}
     with zipfile.ZipFile(unsigned,'a',compression=zipfile.ZIP_DEFLATED) as apk:
         apk.write(out/'classes.dex','classes.dex');apk.write(lib,'lib/arm64-v8a/libmh_runtime.so')
+        if translated:
+            apk.write(harness,'lib/arm64-v8a/libmhae_time_test.so')
+            apk.writestr('assets/translated/time_expected.json',json.dumps(translated,indent=2)+'\n')
     aligned=out/'aligned.apk'; signed=out/'diagnostic-debug.apk'
     run([str(align),'-f','4',str(unsigned),str(aligned)],'diagnostic-zipalign')
     run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'sign','--ks',str(key),'--ks-pass','pass:android','--key-pass','pass:android','--out',str(signed),str(aligned)],'diagnostic-sign')
     run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'verify','--verbose',str(signed)],'diagnostic-sign-verify')
-    return {'apk':str(signed),'scope':'diagnostic only, not a playable game'}
+    return {'apk':str(signed),'scope':'diagnostic only, not a playable game','translated_payload':bool(translated),
+            'distribution':'private: contains translated game code' if translated else 'public sources only'}
 
 def install_diagnostic_on_s25():
     """Install the diagnostic package only if its application ID is absent."""
@@ -1066,6 +1458,37 @@ def install_diagnostic_on_s25():
     output=run(['-s',serial,'install',str(apk)],'diagnostic-install',120)
     if 'Success' not in output:raise WorkSafeError('installation result uncertain')
     return {'installation':'success','package':'com.manhuntae.android','scope':'diagnostic only'}
+
+def update_diagnostic_on_s25():
+    """Replace the installed diagnostic package in place (same debug signature), keeping its data.
+
+    Refuses when the package is absent, so it never installs anything new; no
+    other package is touched and nothing is launched."""
+    import re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'platform-tools'/'adb.exe'
+    apk=ROOT/'build/android-diagnostic-apk/diagnostic-debug.apk'
+    if not apk.is_file():raise WorkSafeError('diagnostic APK missing')
+    def run(args,name,seconds=30,input_bytes=None):
+        result=_run_job([str(adb),*args],seconds,name,cfg,max_processes=4,memory_mb=256,input_bytes=input_bytes)
+        if result['timed_out'] or result['returncode']!=0:raise WorkSafeError(name+' failed; inspect logs')
+        return Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
+    listing=run(['devices','-l'],'diagnostic-update-list')
+    ready=[p[0] for line in listing.splitlines()[1:] if len(p:=line.split())>=2 and p[1]=='device']
+    if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
+    serial=ready[0]
+    script=(b'set -e\nmodel=$(getprop ro.product.model)\n'
+            b'case "$model" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 70;; esac\n'
+            b'[ "$(getprop ro.product.cpu.abi)" = arm64-v8a ] || exit 71\n'
+            b'pm path com.manhuntae.android | grep -q . || exit 73\n'
+            b'echo MHAE_PACKAGE_PRESENT\n')
+    if 'MHAE_PACKAGE_PRESENT' not in run(['-s',serial,'shell','-T','sh'],'diagnostic-update-preflight',input_bytes=script):
+        raise WorkSafeError('package state uncertain')
+    output=run(['-s',serial,'install','-r',str(apk)],'diagnostic-update',120)
+    if 'Success' not in output:raise WorkSafeError('update result uncertain')
+    return {'update':'success','package':'com.manhuntae.android','scope':'diagnostic only'}
 
 def launch_diagnostic_on_s25():
     """Start the installed diagnostic activity on one authorized S25."""
