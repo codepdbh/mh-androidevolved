@@ -1390,8 +1390,12 @@ def build_diagnostic_apk():
     lib=ROOT/'build/android-cmake-check/libmh_runtime.so'; src=ROOT/'android/app/src/main'
     if not all(p.is_file() for p in (java,android,key,aapt,align,d8,signer,lib)):
         raise WorkSafeError('diagnostic build prerequisites missing')
+    import re as _re
+    cmake_text=(src/'cpp/CMakeLists.txt').read_text(encoding='utf-8')
+    runtime_used=[ROOT/'runtime'/n for n in _re.findall(r'\$\{MH_ROOT\}/runtime/(\w+\.c)',cmake_text)]
+    if not runtime_used:raise WorkSafeError('could not read the native source list')
     native_sources=[src/'cpp/native_diagnostics.c',src/'cpp/native_selftest.c',src/'cpp/CMakeLists.txt',ROOT/'tests/test_x87_semantics.c',
-                    *list((ROOT/'runtime').glob('*.c')),*list((ROOT/'runtime').glob('*.h')),*list((ROOT/'recomp').glob('*.h'))]
+                    *runtime_used,*(p.with_suffix('.h') for p in runtime_used if p.with_suffix('.h').is_file()),*list((ROOT/'recomp').glob('*.h'))]
     if any(p.stat().st_mtime>lib.stat().st_mtime for p in native_sources): raise WorkSafeError('native library may be stale; rebuild it first')
     def run(argv,name,seconds=120,memory=512):
         if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM; diagnostic build paused')
@@ -1424,22 +1428,17 @@ def build_diagnostic_apk():
         if translated:
             apk.write(harness,'lib/arm64-v8a/libmhae_time_test.so')
             apk.writestr('assets/translated/time_expected.json',json.dumps(translated,indent=2)+'\n')
-        loader=ROOT/'private/analysis/loader/android/loader_test';loader_record=loader.parent/'validated.json'
-        if loader.is_file() and loader_record.is_file():
-            record=json.loads(loader_record.read_text(encoding='utf-8'))
-            if hashlib.sha256(loader.read_bytes()).hexdigest()==record.get('binary_sha256'):
-                apk.write(loader,'lib/arm64-v8a/libmhae_loader_test.so')
-                apk.writestr('assets/translated/loader_expected.json',json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
-                translated=translated or {}
-                translated['loader']=True
-        allocator=ROOT/'private/analysis/allocator/android/allocator_test';allocator_record=allocator.parent/'validated.json'
-        if allocator.is_file() and allocator_record.is_file():
-            record=json.loads(allocator_record.read_text(encoding='utf-8'))
-            if hashlib.sha256(allocator.read_bytes()).hexdigest()==record.get('binary_sha256'):
-                apk.write(allocator,'lib/arm64-v8a/libmhae_allocator_test.so')
-                apk.writestr('assets/translated/allocator_expected.json',json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
-                translated=translated or {}
-                translated['allocator']=True
+        # Further private payloads: each binary only if its exact hash passed on the S25.
+        for source,library,asset in (('loader/android/loader_test','libmhae_loader_test.so','loader_expected.json'),
+                                     ('allocator/android/allocator_test','libmhae_allocator_test.so','allocator_expected.json'),
+                                     ('heap/android/heap_test','libmhae_heap_test.so','heap_expected.json')):
+            binary=ROOT/'private/analysis'/source;record_path=binary.parent/'validated.json'
+            if not (binary.is_file() and record_path.is_file()):continue
+            record=json.loads(record_path.read_text(encoding='utf-8'))
+            if hashlib.sha256(binary.read_bytes()).hexdigest()!=record.get('binary_sha256'):continue
+            apk.write(binary,'lib/arm64-v8a/'+library)
+            apk.writestr('assets/translated/'+asset,json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
+            translated=translated or {};translated[library]=True
     aligned=out/'aligned.apk'; signed=out/'diagnostic-debug.apk'
     run([str(align),'-f','4',str(unsigned),str(aligned)],'diagnostic-zipalign')
     run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'sign','--ks',str(key),'--ks-pass','pass:android','--key-pass','pass:android','--out',str(signed),str(aligned)],'diagnostic-sign')
@@ -1492,7 +1491,7 @@ def run_loader_on_s25():
     reference=json.loads((ROOT/'private/analysis/loader/x86_reference.json').read_text(encoding='utf-8'))
     if reference.get('strings_unit_sha256')!=strings['unit_sha256']:raise WorkSafeError('x86 reference is stale; rerun tools/probe_loader_x86.py')
     inputs=[ROOT/'tests/loader_native.c',*(deps/n for n in ('loader_helpers_unit.c','file_lifecycle_unit.c','dep_00611640_precise.c','dep_00401030_precise.c','loader_strings_unit.c','dep_00605750_precise.c')),
-            ROOT/'private/analysis/allocator/allocator_unit.c',
+            ROOT/'private/analysis/allocator/allocator_unit.c',ROOT/'private/analysis/heap/heap_unit.c',ROOT/'private/analysis/heap/heap_data.h',ROOT/'runtime/win32_memory.c',ROOT/'runtime/win32_memory.h',
             *(ROOT/'runtime'/n for n in ('guest_memory.c','guest_memory.h','readonly_stream.c','readonly_stream.h','readonly_path.c','readonly_path.h','readonly_handles.c','readonly_handles.h')),
             ROOT/'recomp/checked_memory_adapter.h',ROOT/'recomp/checked_dispatch_adapter.h',ROOT/'private/pcrecomp/runtime/recomp32/recomp_types.h']
     manifest={str(p.relative_to(ROOT)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
@@ -1546,7 +1545,7 @@ def run_loader_on_s25():
     m=re.search(r'^MHAE_BEGIN_LOADER\n(.*?)^MHAE_END_LOADER$',output,re.MULTILINE|re.DOTALL)
     if not m:raise WorkSafeError('missing loader output section')
     jsonl=ROOT/'logs/loader-arm64.jsonl';jsonl.write_text(m.group(1),encoding='utf-8')
-    compared=_run_job([sys.executable,str(ROOT/'tests/compare_loader.py'),str(jsonl)],60,'loader-arm64-compare',cfg,max_processes=1,memory_mb=512)
+    compared=_run_job([sys.executable,str(ROOT/'tests/compare_harness.py'),str(ROOT/'private/analysis/loader/x86_reference.json'),str(jsonl),'android-arm64'],60,'loader-arm64-compare',cfg,max_processes=1,memory_mb=512)
     passed=compared['returncode']==0 and not compared['timed_out']
     models=re.findall(r'^MHAE_MODEL=(\S+)\s*$',output,re.MULTILINE)
     record=out/'validated.json'
@@ -1636,6 +1635,48 @@ def test_allocator(on_device=True):
         (out/'validated.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
             'output_sha256':hashlib.sha256(output.encode('utf-8')).hexdigest(),'compared_against':'tools/probe_allocator_x86.py'},indent=2)+'\n',encoding='utf-8')
     return results
+
+def _validate_unit_harness(name,source,runtime_sources=(),on_device=True):
+    """Build a portable harness for private/analysis/<name>, run it on Windows x64 and
+    optionally on the S25, compare both with <name>/x86_reference.json and record the
+    validated ARM64 binary for the diagnostic APK."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
+    base=ROOT/'private/analysis'/name;report=json.loads((base/f'{name}_report.json').read_text(encoding='utf-8'))
+    if hashlib.sha256((base/f'{name}_unit.c').read_bytes()).hexdigest()!=report['unit_sha256']:raise WorkSafeError(f'{name} unit changed since lift')
+    reference=base/'x86_reference.json'
+    if json.loads(reference.read_text(encoding='utf-8')).get('unit_sha256')!=report['unit_sha256']:raise WorkSafeError(f'{name} x86 reference is stale')
+    includes=[str(ROOT/'private/pcrecomp/runtime/recomp32'),str(ROOT/'recomp'),str(ROOT/'runtime'),str(base)]
+    cl,env=_msvc_env();exe=base/f'{name}-test.exe'
+    built=_run_job([str(cl),'/nologo','/Od','/std:c11',*[x for d in includes for x in ('/I',d)],'/Fo'+str(base)+'\\','/Fe'+str(exe),
+                    str(ROOT/source),'/link','/INCREMENTAL:NO'],180,f'{name}-host-build',cfg,max_processes=4,memory_mb=768,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError(f'{name} host build failed; inspect {name}-host-build logs')
+    ran=_run_job([str(exe)],120,f'{name}-host-run',cfg,max_processes=1,memory_mb=512)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError(f'{name} host run failed with code {ran["returncode"]}')
+    def compare(path,platform):
+        r=_run_job([sys.executable,str(ROOT/'tests/compare_harness.py'),str(reference),str(path),platform],120,f'{name}-{platform}-compare',cfg,max_processes=1,memory_mb=768)
+        text=(Path(r['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')+Path(r['log']+'.stderr.log').read_text(encoding='utf-8',errors='replace')).strip()
+        if r['returncode']!=0 or r['timed_out']:raise WorkSafeError(f'{name} differs on {platform}: {text[-300:]}')
+        return text
+    results={'windows-x64':compare(ran['log']+'.stdout.log','windows-x64')}
+    if on_device:
+        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+        out=base/'android';out.mkdir(exist_ok=True);binary=out/f'{name}_test'
+        arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',
+                      *[x for d in includes for x in ('-I',d)],str(ROOT/source),'-o',str(binary)],180,f'{name}-arm64-build',cfg,max_processes=4,memory_mb=768)
+        if arm['returncode']!=0 or arm['timed_out']:raise WorkSafeError(f'{name} ARM64 build failed')
+        output=_run_binary_on_s25(binary.read_bytes(),name.replace('_','-'))
+        jsonl=ROOT/f'logs/{name}-arm64.jsonl';jsonl.write_text(output,encoding='utf-8')
+        results['android-arm64']=compare(jsonl,'android-arm64')
+        (out/'validated.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
+            'output_sha256':hashlib.sha256(output.encode('utf-8')).hexdigest(),'compared_against':f'private/analysis/{name}/x86_reference.json'},indent=2)+'\n',encoding='utf-8')
+    return results
+
+def test_heap(on_device=True):
+    """The game's own heap (malloc 0x610be0) over the Win32 memory shims, on Windows x64 and the S25."""
+    return _validate_unit_harness('heap','tests/heap_native.c',on_device=on_device)
 
 def update_diagnostic_on_s25():
     """Replace the installed diagnostic package in place (same debug signature), keeping its data.
@@ -2106,6 +2147,21 @@ def test_checked_rep_movs():
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('rep movs test build failed; inspect rep-movs-build logs')
     ran=_run_job([str(exe)],30,'rep-movs-run',cfg,max_processes=1,memory_mb=256)
     if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('rep movs test failed with code '+str(ran['returncode']))
+    return {'build':built,'run':ran}
+
+def test_win32_memory():
+    """Compile and run synthetic checks of the Win32 memory shims on the host; no game code."""
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    cl,env=_msvc_env()
+    output=ROOT/'build'/'win32-memory-test';output.mkdir(parents=True,exist_ok=True);exe=output/'win32-memory-test.exe'
+    argv=[str(cl),'/nologo','/Od','/std:c11','/W4','/I',str(ROOT/'runtime'),'/Fo'+str(output)+'\\','/Fe'+str(exe),
+          str(ROOT/'tests'/'test_win32_memory.c'),str(ROOT/'runtime'/'win32_memory.c'),str(ROOT/'runtime'/'guest_memory.c'),'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,'win32-memory-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('win32 memory test build failed; inspect win32-memory-build logs')
+    ran=_run_job([str(exe)],30,'win32-memory-run',cfg,max_processes=1,memory_mb=256)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('win32 memory test failed with code '+str(ran['returncode']))
     return {'build':built,'run':ran}
 
 def test_x87_semantics():

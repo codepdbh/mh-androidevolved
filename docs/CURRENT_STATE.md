@@ -4,6 +4,7 @@ El juego todavía no es jugable. La APK instalada es un diagnóstico: selecciona
 
 ## Verificado
 
+- **Heap del juego y shims Win32 de memoria (16-11):** 19 funciones; `GlobalAlloc` y secciones críticas implementadas en `runtime/win32_memory.c`. Cargador sobre la pila completa: 52 funciones, idéntico a x86 en el S25 y en la app. Ver `evidence/S25_HEAP_AND_WIN32_MEMORY.md`.
 - **Asignador del juego (16-11):** 12 funciones traducidas; 960 operaciones idénticas a x86 en Windows y S25. Integrado en el cargador (33 funciones) y en la app. Ver `evidence/S25_ALLOCATOR.md`.
 - **Cargador `0x605750` (16-11):** 21 funciones traducidas con apertura y lectura reales de solo lectura; 16 casos idénticos a x86 en el S25 y dentro de la app. Ver `evidence/S25_LOADER.md`.
 - **App en el S25 (16-11):** autodiagnóstico ARM64, lectura real de `manhunt.exe` por descriptor SAF con la capa del port y ejecución dentro de la app del código traducido de la candidata de tiempo, con salida idéntica a la validada frente a x86. APK privada por contener ese código; ver `evidence/S25_APP_SELFTEST.md`.

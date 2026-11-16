@@ -218,7 +218,9 @@ public final class MainActivity extends Activity {
         boolean mainOk = main.exit == 0 && expected.getString("main_output_sha256").equals(main.sha256);
         boolean zeroOk = zero.exit == 0 && expected.getString("zero_output_sha256").equals(zero.sha256);
         String loader = loaderReport() + "\n" + validatedReport("libmhae_allocator_test.so", "translated/allocator_expected.json",
-            "Asignador de memoria del juego (constructor, reservar y liberar; 16 casos, 960 operaciones)");
+            "Asignador de memoria del juego (constructor, reservar y liberar; 16 casos, 960 operaciones)")
+            + "\n" + validatedReport("libmhae_heap_test.so", "translated/heap_expected.json",
+            "Heap del juego sobre GlobalAlloc y secciones críticas del port (16 casos, 640 malloc)");
         elapsed = android.os.SystemClock.elapsedRealtime() - started;
         boolean all = mainOk && zeroOk && x87.exit == 0 && faultsOk == faults.length && !loader.contains("distinto") && !loader.contains("no se");
         return (all ? "CORRECTO" : "FALLO") + " · código traducido del juego ejecutado en ARM64 dentro de la app (" + elapsed + " ms)\n"
@@ -244,7 +246,7 @@ public final class MainActivity extends Activity {
         try {
             RunResult r = runHarness(binary, work.getAbsolutePath());
             boolean ok = r.exit == 0 && expected.getString("output_sha256").equals(r.sha256);
-            return "· Cargador de archivos 0x605750 (construcción de ruta, CreateFileA/ReadFile/CloseHandle reales de solo lectura, 16 casos): "
+            return "· Cargador de archivos 0x605750 sobre asignador, heap y Win32 del port (52 funciones traducidas, 16 casos): "
                 + (ok ? "idéntico a x86" : "distinto (código " + r.exit + ")");
         } finally {
             if (!work.delete()) work.deleteOnExit();

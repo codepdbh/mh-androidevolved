@@ -1,5 +1,7 @@
 # Estado técnico
 
+2026-11-16, más reciente: el heap propio del juego (`0x610be0`, 19 funciones) funciona traducido sobre los primeros shims Win32 del port (`GlobalAlloc`, `Enter/LeaveCriticalSection`) y coincide con x86 en Windows y en el S25 (640 malloc). El cargador corre ya sobre la pila completa: cargador, asignador y heap del juego (52 funciones traducidas) más los shims de archivo y memoria, sin dobles de memoria. Es idéntico a x86 en el S25 y en la app. Ver `docs/evidence/S25_HEAP_AND_WIN32_MEMORY.md`.
+
 2026-11-16, más reciente: el asignador de memoria del juego (pool `0x67d000`: constructor, reservar y liberar; 12 funciones) está traducido y coincide con x86 en 16 casos y 960 operaciones en Windows x64 y en el S25. El cargador `0x605750` lo usa ya en lugar de dobles de prueba: 33 funciones traducidas trabajando juntas, idénticas a x86 en el S25 y dentro de la app. Ver `docs/evidence/S25_ALLOCATOR.md`.
 
 2026-11-16, más reciente: el cargador de ranuras `0x605750` funciona traducido en ARM64 con 21 funciones reales del juego (clase de cadenas, lectura por bloques y ciclo de archivo) sobre la capa real de handles de solo lectura. En el S25 coincidió con x86 en 16 casos: ranura exacta, byte sobrante, archivo corto e inexistente. También se ejecuta dentro de la app, con resultado idéntico. Siguen como dobles el asignador de pool y la liberación del juego. Ver `docs/evidence/S25_LOADER.md`.
