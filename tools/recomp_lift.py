@@ -23,12 +23,12 @@ import pefile
 from capstone import Cs,CS_ARCH_X86,CS_MODE_32
 from inspect_entrypoint import ROOT,GAME,PCRECOMP,EXPECTED,REVISION
 ALLOWED={'MEM8','MEM16','MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}
-PURE_HELPERS={'recomp_flags_pack','recomp_eflags','recomp_eflags_setcf','recomp_flags_adc','recomp_flags_sbb'}  # pure functions of their arguments
+PURE_HELPERS={'recomp_flags_pack','recomp_eflags','recomp_eflags_setcf','recomp_flags_adc','recomp_flags_sbb','recomp_cond','recomp_carry','recomp_cond_cf','recomp_parity8'}  # pure functions of their arguments (checked: no globals, no memory)
 # Closed list of macros allowed in translated code; any other uppercase macro call aborts.
 MACROS={'MEM8','MEM16','MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT',
         'MH_RECOMP_CALL_AT','MH_RECOMP_ICALL_AT','MH_RECOMP_IJMP_AT','MH_VIRTUAL_CPUID','FK_NARROW','LO8','LO16','HI8','SET_LO8','SET_LO16','SET_HI8','BSWAP32',
         'CMP_EQ','CMP_NE','CMP_B','CMP_BE','CMP_A','CMP_AE','CMP_L','CMP_LE','CMP_G','CMP_GE','CMP_S','CMP_NS',
-        'TEST_Z','TEST_NZ','TEST_S','TEST_NS','TEST_G','TEST_LE'}
+        'TEST_Z','TEST_NZ','TEST_S','TEST_NS','TEST_G','TEST_LE','RECOMP_PF'}   # RECOMP_PF: parity of the result's low byte (x86 PF)
 # Deliberately absent: CMP_O/CMP_NO/CMP_P/CMP_NP are TODO stubs in PCRecomp (constant results), so jo/jno/jp/jnp abort.
 CPUID='CPUID(eax, ebx, ecx, edx);'
 CALL=re.compile(r'RECOMP_CALL\(sub_([0-9A-F]{8})\); /\* 0x([0-9A-F]{8}): call 0x([0-9a-f]+) \*/')
@@ -37,7 +37,7 @@ STOS=re.compile(r'\{ uint32_t _n = ecx, _b = _n \* ([124])u; /\* (0x[0-9A-F]{8}:
                 r'if \(_df > 0\) \{ (?:memset|MEMSET16|MEMSET32)\(\(void\*\)ADDR\(edi\), (?:LO8\(eax\)|LO16\(eax\)|eax), _n\); edi \+= _b; \} '
                 r'else \{ (?:memset|MEMSET16|MEMSET32)\(\(void\*\)ADDR\(edi - _b \+ \1u\), (?:LO8\(eax\)|LO16\(eax\)|eax), _n\); edi -= _b; \} ecx = 0; \}')
 
-X87_HELPERS={'fp_push','fp_pop','fp_push_i64','fp_round_cw'}
+X87_HELPERS={'fp_push','fp_pop','fp_push_i64','fp_round_cw','fp_xch','fabs'}
 X87_OPS={'+':'mh_x87_add','-':'mh_x87_sub','*':'mh_x87_mul','/':'mh_x87_div'}
 X87_LIBM=re.compile(r'\b(sqrt|fabs|floor|ceil|trunc|nearbyint|rint|round|fmod|pow|ldexp|frexp|log\w*|exp\w*|sin|cos|tan|atan\w*|fp_\w+)\s*\(')
 X87_ARITH_LEFT=re.compile(r'_st\[\d\]\s*[-+*/]=|[-+*/]\s*(?:\(double\)\s*)?_st\[|_st\[\d\]\s*[-+*/](?!=)|\b_v\s*[-+*/]|[-+*/]\s*_v\b')
@@ -46,11 +46,40 @@ def _x87_rewrite(source,address):
     counts={}
     def count(key,n):
         if n:counts[key]=counts.get(key,0)+n
+    # fld/fstp tbyte: 10 checked bytes and exact NaN/infinity conversion
+    source,n=re.subn(r'fp_push\(fp_ld80\(\(const uint8_t\*\)ADDR\(([^;]*?)\)\)\);',r'fp_push(mh_x87_ld80((const uint8_t*)mh_recomp_access((uint32_t)(\1), 10)));',source);count('fld tbyte',n)
+    source,n=re.subn(r'fp_st80\(\(uint8_t\*\)ADDR\(([^;]*?)\), fp_pop\(\)\);',r'mh_x87_st80((uint8_t*)mh_recomp_access((uint32_t)(\1), 10), fp_pop());',source);count('fstp tbyte',n)
     for old,new in (('*(float*)ADDR(','MEMF('),('*(double*)ADDR(','MEMD('),('*(float*)&MEM32(','MEMF('),('*(double*)&MEM64(','MEMD(')):
         count('checked float access',source.count(old));source=source.replace(old,new)
+    # Transcendental and special forms, exactly as lift32.py emits them (before the generic
+    # arithmetic rule, which would otherwise take `*= log(...)` for a multiplication).
+    special=(
+        ('{ double _x = fp_pop(); _st[0] *= log(_x) / 0.6931471805599453; }','{ double _x = fp_pop(); _st[0] = mh_x87_yl2x(_st[0], _x); }','fyl2x'),
+        ('{ double _x = fp_pop(); _st[0] *= log(_x + 1.0) / 0.6931471805599453; }','{ double _x = fp_pop(); _st[0] = mh_x87_yl2xp1(_st[0], _x); }','fyl2xp1'),
+        ('_st[0] = pow(2.0, _st[0]) - 1.0;','_st[0] = mh_x87_f2xm1(_st[0]);','f2xm1'),
+        ('_st[0] *= pow(2.0, (double)(int)_st[1]);','_st[0] = mh_x87_scale(_st[0], _st[1]);','fscale'),
+        ('_st[0] = fmod(_st[0], _st[1]);','_st[0] = mh_x87_fmod(_st[0], _st[1]);','fprem'),
+        ('{ double _x = fp_pop(); _st[0] = atan2(_st[0], _x); }','{ double _x = fp_pop(); _st[0] = mh_x87_atan2(_st[0], _x); }','fpatan'),
+        ('_st[0] = -_st[0];','_st[0] = mh_x87_chs(_st[0]);','fchs'),
+        ('_st[0] = sin(_st[0]);','_st[0] = mh_x87_sin(_st[0]);','fsin'),
+        ('_st[0] = cos(_st[0]);','_st[0] = mh_x87_cos(_st[0]);','fcos'),
+        ('_st[0] = tan(_st[0]); fp_push(1.0);','_st[0] = mh_x87_tan(_st[0]); fp_push(1.0);','fptan'),
+        ('{ double _a = _st[0]; _st[0] = sin(_a); fp_push(cos(_a)); }','{ double _a = _st[0]; _st[0] = mh_x87_sin(_a); fp_push(mh_x87_cos(_a)); }','fsincos'))
+    for old,new,label in special:
+        count(label,source.count(old));source=source.replace(old,new)
+    # fdivp/fdivrp: PCRecomp guards a zero divisor by keeping the operand; x87 (exceptions masked)
+    # gives a signed infinity, or the indefinite for 0/0 -- IEEE division through the helper.
+    source,n=re.subn(r'\{ double _v = fp_pop\(\); (_st\[\d\]) = _v == 0\.0 \? \1 : \1 / _v; \}',r'{ double _v = fp_pop(); \1 = mh_x87_div(\1, _v); }',source);count('fdivp',n)
+    source,n=re.subn(r'\{ double _v = fp_pop\(\); (_st\[\d\]) = \1 == 0\.0 \? _v : _v / \1; \}',r'{ double _v = fp_pop(); \1 = mh_x87_div(_v, \1); }',source);count('fdivrp',n)
+    # fist/fistp word and dword: integer indefinite instead of C's undefined conversion
+    source,n=re.subn(r'\(uint32_t\)\(int32_t\)fp_to_int\(([^;]*?)\);',r'(uint32_t)mh_x87_to_i32(\1, _fpu_cw);',source);count('fist dword',n)
+    source,n=re.subn(r'\(int16_t\)fp_to_int\(([^;]*?)\);',r'(uint16_t)mh_x87_to_i16(\1, _fpu_cw);',source);count('fist word',n)
     # st(i) op= rhs  ->  st(i) = helper(st(i), rhs)
     source,n=re.subn(r'_st\[(\d)\] ([-+*/])= ([^;]+);',lambda m:f'_st[{m.group(1)}] = {X87_OPS[m.group(2)]}(_st[{m.group(1)}], {m.group(3)});',source)
     count('x87 arithmetic',n)
+    # integer-operand forms (fimul/fiadd/fisub/fidiv): st(i) = st(i) op rhs
+    source,n=re.subn(r'_st\[(\d)\] = _st\[\1\] ([-+*/]) ([^;]+);',lambda m:f'_st[{m.group(1)}] = {X87_OPS[m.group(2)]}(_st[{m.group(1)}], {m.group(3)});',source)
+    count('x87 integer-operand arithmetic',n)
     # reverse forms (fsubr/fdivr): st(i) = rhs op st(i)
     def reverse(m):
         if m.group(1)!=m.group(4):raise SystemExit(f'unexpected reverse x87 form at {address:#x}')
@@ -65,11 +94,55 @@ def _x87_rewrite(source,address):
     if re.search(r'\(float\*\)|\(double\*\)|\bADDR\(',code):raise SystemExit(f'unchecked float access left at {address:#x}')
     return source,counts
 
+def switch_bound(read,address):
+    """Number of entries of the jump table dispatched by the `jmp [table + idx*4]` at `address`,
+    from its guard: the last `cmp idx, N` followed by `ja` (N+1 entries) or `jae` (N entries)
+    among the few instructions before it, with no later write to idx. None when absent."""
+    decoder=Cs(CS_ARCH_X86,CS_MODE_32)
+    for back in range(0x30,0,-1):
+        ins=list(decoder.disasm(read(address-back,back+8),address-back))
+        if any(i.address==address for i in ins):break
+    else:return None
+    k=next(j for j,i in enumerate(ins) if i.address==address)
+    jmp=ins[k];idx=jmp.op_str.split('[')[1].split('*')[0].strip()
+    for j in range(k-1,max(k-8,0),-1):
+        i=ins[j]
+        if i.mnemonic in('ja','jae'):
+            # the flags come from the nearest cmp before it; flag-neutral moves in between must not write idx
+            c=j-1
+            while c>0 and ins[c].mnemonic in('mov','lea','movzx','movsx','push','pop') and ins[c].op_str.split(',')[0].strip()!=idx:c-=1
+            if ins[c].mnemonic=='test' and i.mnemonic=='ja' and ins[c].op_str==f'{idx}, {idx}':return 1   # test leaves CF=0: ja exits unless idx==0
+            if ins[c].mnemonic!='cmp':return None
+            cmp=ins[c];reg,_,imm=cmp.op_str.partition(', ')
+            if reg!=idx or not imm.startswith(('0x','1','2','3','4','5','6','7','8','9')) or not imm.replace('0x','').isalnum():return None
+            n=int(imm,0)+(1 if i.mnemonic=='ja' else 0)
+            return n if 0<n<=1024 else None
+        if i.op_str.split(',')[0].strip()==idx and i.mnemonic not in('cmp','test','push'):return None   # idx rewritten after the guard
+    return None
+
 def _tools():
     for part in ('pe','disasm','lift'):sys.path.insert(0,str(PCRECOMP/'tools'/part))
     from pe_analyze import analyze_pe,build_iat_map
+    import disasm32
     from disasm32 import Disassembler
     from lift32 import Lifter
+    if not getattr(Disassembler,'_mh_bounded',False):
+        # PCRecomp reads a jump table until the first non-code entry, so adjacent tables of
+        # different switches merge and pull other functions' code in. Bound every table by its
+        # guard instead and require all its entries to be code; no guard aborts the lift.
+        def bounded(self,insn,limit=256):
+            if not insn.operands:return []
+            op=insn.operands[0]
+            if op.type!=disasm32.X86_OP_MEM or op.mem.scale!=4 or not op.mem.index:return []
+            n=switch_bound(self.read_bytes,insn.address)
+            if n is None:raise SystemExit(f'jump table at {insn.address:#x} without a recognisable bound')
+            table=op.mem.disp&0xFFFFFFFF;out=[]
+            for k in range(n):
+                tgt=int.from_bytes(self.read_bytes(table+4*k,4),'little')
+                if not self.is_code_address(tgt):raise SystemExit(f'jump table {table:#x} entry {k} is not code ({tgt:#x})')
+                out.append(tgt)
+            return out
+        Disassembler.jump_table_targets=bounded;Disassembler._mh_bounded=True
     return analyze_pe,build_iat_map,Disassembler,Lifter
 
 def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_code_pointers=False,auto_stop=False,x87=False,provided=(),dispatch_slots=()):
@@ -85,11 +158,18 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
         if slot not in names:raise SystemExit(f'{slot:#x} is not an import slot')
     analyze_pe,build_iat_map,Disassembler,Lifter=_tools()
     info=analyze_pe(str(GAME));iat=build_iat_map(info);dis=Disassembler(data,info.image_base,info.sections)
-    order=[];pending=list(roots);graph={};pointers=set()
+    order=[];pending=list(roots);graph={};pointers=set();thunks={}
     text=[x for x in pe.sections if x.Name.rstrip(b'\0')==b'.text'][0];text_start=base+text.VirtualAddress;text_end=text_start+text.Misc_VirtualSize
     while pending:
         address=pending.pop(0)
         if address in graph or address in stop:continue
+        # A thunk (`jmp rel` at the entry, e.g. 0x610f00 -> 0x610d40) is a tail jump to another
+        # function, not part of its body: translate it as a call that the target returns from.
+        entry=list(decoder.disasm(pe.get_data(address-base,5),address,count=1))
+        if entry and entry[0].mnemonic=='jmp' and entry[0].bytes[0] in (0xe9,0xeb) and entry[0].op_str.startswith('0x'):
+            target=int(entry[0].op_str,16)
+            if target!=address and text_start<=target<text_end:
+                thunks[address]=(target,entry[0]);graph[address]=None;order.append(address);pending.append(target);continue
         func=dis.disassemble_function(address,iat)
         if not func:raise SystemExit(f'no function at {address:#x}')
         graph[address]=func;order.append(address)
@@ -106,9 +186,30 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
                         pointers.add(value);pending.append(value)
     sources=[];items=[];used_imports=set();stopped={}
     def translate(address):
+        if address in thunks:
+            target,ins=thunks[address]
+            source=(f'void sub_{address:08X}(void) {{\n    g_cur_func = 0x{address:08X}u;\n'
+                    f'    sub_{target:08X}(); /* 0x{address:08X}: jmp 0x{target:x} (thunk: tail jump, the target returns) */\n}}\n')
+            return source,{'address':hex(address),'instructions':1,'range':[hex(address),hex(address+ins.size)],
+                           'bytes_sha256':hashlib.sha256(bytes(ins.bytes)).hexdigest(),'lifted_sha256':hashlib.sha256(source.encode()).hexdigest(),
+                           'sites':[{'jump':hex(address),'target':hex(target)}],'rewrites':['thunk'],'operations':[]},set()
         func=graph[address];instructions=[i for b in func.blocks.values() for i in b.instructions]
         start=min(i.address for i in instructions);end=max(i.address+i.size for i in instructions)
-        if start!=address or end-start>0x2000:raise SystemExit(f'unexpected range at {address:#x}')
+        # Jump tables are bounded (see _tools), so what PCRecomp merges into a function is code
+        # reached by its own jumps: tail jumps into neighbouring functions are executed in line,
+        # which is equivalent (same stack and registers). Large gaps or spans still mean an error.
+        # Each separate stretch of code (split at gaps over 64 bytes) other than the entry's must
+        # begin at the target of one of the function's unconditional jumps, i.e. be a tail jump;
+        # a stretch starting anywhere else (e.g. at a misread switch arm) is rejected.
+        spans=sorted({(i.address,i.address+i.size) for i in instructions})
+        segments=[[spans[0][0],spans[0][1]]]
+        for a0,a1 in spans[1:]:
+            if a0-segments[-1][1]>64:segments.append([a0,a1])
+            else:segments[-1][1]=max(segments[-1][1],a1)
+        jumps={int(i.op_str,16) for i in instructions if i.mnemonic=='jmp' and i.op_str.startswith('0x')}
+        stray=[hex(s0) for s0,s1 in segments if not s0<=address<s1 and s0 not in jumps]
+        if address not in {i.address for i in instructions} or stray or end-start>0x100000:
+            raise SystemExit(f'unexpected range at {address:#x} ({end-start:#x} bytes; stretches not reached by a jmp: {stray})')
         source=Lifter(iat_map=iat).lift_function(func)
         if 'RECOMP_TODO' in source:raise SystemExit(f'unsupported instruction at {address:#x}')
         lifted=hashlib.sha256(source.encode()).hexdigest();sites=[];rewrites=[];used=set()
@@ -121,10 +222,10 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
             return f'MH_RECOMP_CALL_AT(sub_{target:08X}, 0x{site+5:08X}u);'
         def indirect_import(m):
             slot=int(m.group(1),16);site=int(m.group(2),16)
-            if slot!=int(m.group(3),16) or (slot not in imports and slot not in dispatch_slots):raise SystemExit(f'indirect call through {slot:#x} at {site:#x} is not an allowed import')
+            if slot!=int(m.group(3),16) or (slot not in imports and slot not in dispatch_slots and (slot in names or not indirect)):raise SystemExit(f'indirect call through {slot:#x} at {site:#x} is not an allowed import')
             ins=list(decoder.disasm(pe.get_data(site-base,6),site,count=1))
             if len(ins)!=1 or ins[0].mnemonic!='call' or ins[0].size!=6 or ins[0].bytes[:2]!=b'\xff\x15':raise SystemExit(f'import call decoding mismatch at {site:#x}')
-            if slot in dispatch_slots:  # dispatched by the slot's run-time value, with the exact return address
+            if slot in dispatch_slots or slot not in names:  # a slot or a global function pointer: dispatched by its run-time value, exact return address
                 sites.append({'call':hex(site),'slot':hex(slot),'dispatch':True,'return':hex(site+6)})
                 return f'MH_RECOMP_ICALL_AT(MEM32(0x{slot:X}), 0x{site+6:08X}u);'
             used.add(slot);sites.append({'call':hex(site),'import':names[slot],'slot':hex(slot),'return':hex(site+6)})
@@ -146,19 +247,35 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
             return f'MH_RECOMP_ICALL_AT({expr}, 0x{site+ins[0].size:08X}u);'
         def import_jump(m):
             slot=int(m.group(1),16);site=int(m.group(2),16)
-            if slot!=int(m.group(3),16) or slot not in imports:raise SystemExit(f'jump through {slot:#x} at {site:#x} is not an allowed import')
+            if slot!=int(m.group(3),16) or (slot not in imports and (slot in names or not indirect)):raise SystemExit(f'jump through {slot:#x} at {site:#x} is not an allowed import')
             ins=list(decoder.disasm(pe.get_data(site-base,6),site,count=1))
             if len(ins)!=1 or ins[0].mnemonic!='jmp' or ins[0].size!=6 or ins[0].bytes[:2]!=b'\xff\x25':raise SystemExit(f'import jump decoding mismatch at {site:#x}')
+            if slot not in names:   # a global function pointer, dispatched by its run-time value
+                sites.append({'jump':hex(site),'slot':hex(slot),'dispatch':True});return f'MH_RECOMP_IJMP_AT(MEM32(0x{slot:X})); return;'
             used.add(slot);sites.append({'jump':hex(site),'import':names[slot],'slot':hex(slot)})
             return f'MH_RECOMP_IJMP_AT(MEM32(0x{slot:X})); return;'
         source=CALL.sub(direct,source);source=ICALL.sub(indirect_import,source)
         source=re.sub(r'RECOMP_ITAIL\(MEM32\(0x([0-9A-F]+)\)\); return; /\* 0x([0-9A-F]{8}): jmp dword ptr \[0x([0-9a-f]+)\] \*/',import_jump,source)
+        def indirect_jump(m):
+            # `jmp reg` / `jmp [mem]` that is not a switch: a tail call through a vtable or pointer,
+            # dispatched fail-closed with the caller's return address still on the stack.
+            expr=m.group(1);site=int(m.group(2),16)
+            if not indirect:raise SystemExit(f'indirect jump at {site:#x} not allowed for this unit')
+            ins=list(decoder.disasm(pe.get_data(site-base,8),site,count=1))
+            if len(ins)!=1 or ins[0].mnemonic!='jmp' or ins[0].bytes[0]!=0xff:raise SystemExit(f'indirect jump decoding mismatch at {site:#x}')
+            sites.append({'jump':hex(site),'indirect':ins[0].op_str})
+            return f'MH_RECOMP_IJMP_AT({expr}); return;'
+        source=re.sub(r'RECOMP_ITAIL\(([^;]*?)\); return; /\* 0x([0-9A-F]{8}): jmp [^*]*\*/',indirect_jump,source)
         source=re.sub(r'RECOMP_ICALL\(([^;]*?)\); /\* 0x([0-9A-F]{8}): call [^*]*\*/',dynamic,source)
         source=STOS.sub(stos,source)
         source,n=re.subn(r'\brecomp_rep_movs\(','mh_recomp_rep_movs(',source)
         if n:rewrites.append(f'{n} rep movs')
         n=source.count(CPUID)
         if n:source=source.replace(CPUID,'MH_VIRTUAL_CPUID();');rewrites.append(f'{n} cpuid -> virtual CPU')
+        # Switches: the bounded table only holds this function's arms, so a value that is not one
+        # of them is a fault, not a tail jump to an unknown address.
+        source,n=re.subn(r'default: RECOMP_ITAIL\(_jt\); return;','default: mh_dispatch_fault(_jt, g_cur_func); abort();',source)
+        if n:rewrites.append(f'{n} bounded switch')
         if x87:
             source,counts=_x87_rewrite(source,address)
             rewrites.extend(f'{v} {k}' for k,v in counts.items())
@@ -171,7 +288,8 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
         helpers=set(re.findall(r'\b(recomp_\w+)\s*\(',code_only))
         if not helpers.issubset(PURE_HELPERS):raise SystemExit(f'unchecked runtime helpers at {address:#x}: '+','.join(sorted(helpers-PURE_HELPERS)))
         operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',code_only))
-        if not operations.issubset(ALLOWED|({'MEMF','MEMD','MEM64'} if x87 else set())):raise SystemExit(f'unsupported operations at {address:#x}: '+','.join(sorted(operations-ALLOWED)))
+        allowed=ALLOWED|{'RECOMP_PF'}|({'MEMF','MEMD','MEM64'} if x87 else set())
+        if not operations.issubset(allowed):raise SystemExit(f'unsupported operations at {address:#x}: '+','.join(sorted(operations-allowed)))
         return source,dict({'address':hex(address),'instructions':len(instructions),'range':[hex(start),hex(end)],
                       'bytes_sha256':hashlib.sha256(pe.get_data(start-base,end-start)).hexdigest(),'lifted_sha256':lifted,
                       'sites':sites,'rewrites':rewrites,'operations':sorted(operations)}),used

@@ -449,11 +449,55 @@ def make(ctx):
         if a[0]:window(a[0])
         if a[3]:unsupported('SetTimer with a TIMERPROC')
         tid=a[1] if a[0] else 0x7000+len(state['timers'])
-        state['timers'][(a[0],tid)]=max(a[2],10);return tid
+        state['timers'][(a[0],tid)]=[max(a[2],10),state['clock']+max(a[2],10)];return tid
     @api('KillTimer',2)
     def _(a):
         if (a[0],a[1]) in state['timers']:del state['timers'][(a[0],a[1])];return 1
         state['last_error']=1402;return 0   # ERROR_INVALID_TIMER_HANDLE (FALSE, as Windows for an unknown timer)
+    # Message queue. Posted messages are FIFO; WM_TIMER is generated when a timer is due on the
+    # clock, with the lowest priority, as in Windows; WM_QUIT comes from PostQuitMessage. On the
+    # device the touch/gamepad layer injects input messages here; the reference has no input.
+    # MSG: hwnd, message, wParam, lParam, time, pt.x, pt.y.
+    WM_TIMER,WM_QUIT=0x113,0x12
+    state.setdefault('queue',[]);queue=state['queue']
+    def next_message(hwnd,lo,hi,remove):
+        def match(m):return (not hwnd or m[0]==hwnd) and ((lo==0 and hi==0) or lo<=m[1]<=hi)
+        for i,m in enumerate(queue):
+            if match(m):
+                if remove:queue.pop(i)
+                return m
+        for (h,tid),t in sorted(state['timers'].items()):
+            if state['clock']>=t[1] and match((h,WM_TIMER)):
+                if remove:t[1]=state['clock']+t[0]
+                return (h,WM_TIMER,tid,0)
+        return None
+    def write_msg(at,m):
+        for i,v in enumerate((m[0],m[1],m[2],m[3],state['clock']&0xffffffff,cur['pos'][0],cur['pos'][1])):w32(at+4*i,v)
+    @api('PeekMessageA',5)
+    def _(a):
+        m=next_message(a[1],a[2],a[3],a[4]&1)
+        if m is None:return 0
+        write_msg(a[0],m);return 1
+    @api('GetMessageA',4)
+    def _(a):
+        m=next_message(a[1],a[2],a[3],True)
+        if m is None:unsupported('GetMessageA would block with an empty queue (no input in the reference)')
+        write_msg(a[0],m);return 0 if m[1]==WM_QUIT else 1
+    @api('PostMessageA',4)
+    def _(a):
+        if a[0] and a[0] not in state['windows']:state['last_error']=1400;return 0
+        queue.append((a[0],a[1],a[2],a[3]));return 1
+    @api('PostQuitMessage',1)
+    def _(a):queue.append((0,WM_QUIT,a[0],0));return None
+    @api('TranslateMessage',1)
+    def _(a):return 0   # WM_CHAR is produced by the port's input layer directly
+    @api('DispatchMessageA',1)
+    def _(a):
+        hwnd,msg,wp,lp=[ctx['r32'](a[0]+4*i) for i in range(4)]
+        if msg==WM_TIMER and lp:unsupported('WM_TIMER with a TIMERPROC')
+        w=state['windows'].get(hwnd)
+        if not w or not w['wndproc']:return 0
+        return Callbacks([(w['wndproc'],[hwnd,msg,wp,lp])],lambda r:r[0])
     @api('SetWindowTextA',2)
     def _(a):window(a[0])['title']=ctx['cstr'](a[1],1024) if a[1] else '';return 1
     @api('GetWindowTextA',3)
@@ -822,6 +866,31 @@ def make(ctx):
             w,h=max(1,w//2),max(1,h//2)
         tex=new_object(texture_iface(),{'device':a[0],'format':fmt,'usage':usage,'pool':pool,'levels':chain})
         w32(out,tex);return D3D_OK
+    # CopyRects: copies rectangles between surfaces of the same format (whole source when
+    # cRects is 0). Surfaces get guest memory on first use; DXT copies whole 4x4 blocks.
+    def surface_memory(s):
+        d=com['objects'][s]['data']
+        if 'memory' not in d:
+            pitch,size=level_layout(d['format'],d['width'],d['height']);d['pitch'],d['memory']=pitch,res_alloc(size)
+        return d
+    @device_method('CopyRects')
+    def _(o,a):
+        src,rects,count,dst,points=a[1:6]
+        if src not in com['objects'] or dst not in com['objects']:return D3DERR_INVALIDCALL
+        s,d=surface_memory(src),surface_memory(dst)
+        if s['format']!=d['format']:return D3DERR_INVALIDCALL
+        dxt=s['format']>0xffff;unit=4 if dxt else 1;bpp=(8 if s['format']==DXT1 else 16) if dxt else bytes_per_pixel(s['format'])
+        boxes=[[ctx['r32'](rects+16*i+4*k) for k in range(4)] for i in range(count)] if count else [[0,0,s['width'],s['height']]]
+        for i,(l,t,r,b) in enumerate(boxes):
+            px,py=(ctx['r32'](points+8*i),ctx['r32'](points+8*i+4)) if points else (l,t)
+            if r>s['width'] or b>s['height'] or px+(r-l)>d['width'] or py+(b-t)>d['height']:return D3DERR_INVALIDCALL
+            row=((r-l+unit-1)//unit)*bpp
+            for y in range(t//unit,(b+unit-1)//unit):
+                data=bytes(cpu.mem_read(s['memory']+y*s['pitch']+(l//unit)*bpp,row))
+                cpu.mem_write(d['memory']+(py//unit+y-t//unit)*d['pitch']+(px//unit)*bpp,data)
+        d['version']=d.get('version',0)+1
+        if d.get('level') is not None:d['level']['version']+=1
+        return D3D_OK
     @device_method('CreateDepthStencilSurface')
     def _(o,a):
         width,height,fmt,ms,out=a[1:6]
@@ -1008,6 +1077,180 @@ def make(ctx):
         ('GetAdapterMonitor',2,None),('CreateDevice',7,d3d_create_device)])
     @api('Direct3DCreate8',1)
     def _(a):return new_object(D3D8) if a[0]==220 else 0
+
+    # ---- Miles Sound System (mss32) ---------------------------------------------------------
+    # The port replaces Miles with its own mixer over Android audio. One digital driver and one
+    # 3D provider ("Miles Fast 2D Positional Audio": positional panning/attenuation, no HRTF or
+    # EAX); 32 voices. Playback progresses with the reference's virtual clock. Strings returned
+    # to the game live in a guest scratch area. Handles: driver 0x6D000001, provider 0x6E000001,
+    # samples 0x6F000004 + 4n.
+    MSS_SCRATCH=0x1f12000
+    state.setdefault('mss',{'redist':MSS_SCRATCH,'prefs':{},'driver':0,'provider_open':False,'samples':{},'scratch':MSS_SCRATCH+0x10})
+    mss=state['mss']
+    def mss_string(text):
+        at=mss['scratch'];data=text.encode('latin-1')+b'\0';cpu.mem_write(at,data);mss['scratch']=(at+len(data)+3)&~3;return at
+    if mss['scratch']==MSS_SCRATCH+0x10:cpu.mem_write(MSS_SCRATCH,b'\0')
+    PROVIDER,PROVIDER_NAME=0x6E000001,'Miles Fast 2D Positional Audio'
+    @api('_AIL_set_redist_directory@4',1)
+    def _(a):old=mss['redist'];mss['redist']=mss_string(ctx['cstr'](a[0])) if a[0] else MSS_SCRATCH;return old
+    @api('_AIL_startup@0',0)
+    def _(a):mss['started']=True;return 1
+    @api('_AIL_shutdown@0',0)
+    def _(a):mss['started']=False;return None
+    @api('_AIL_set_preference@8',2)
+    def _(a):old=mss['prefs'].get(a[0],0);mss['prefs'][a[0]]=a[1];return old
+    @api('_AIL_ms_count@0',0)
+    def _(a):return tick()&0xffffffff
+    @api('_AIL_open_digital_driver@16',4)
+    def _(a):
+        freq,bits,channels,flags=a[:4]
+        if bits not in (8,16) or channels not in (1,2):return 0
+        mss['driver']=0x6D000001;mss['driver_format']=(freq,bits,channels);return mss['driver']
+    @api('_AIL_close_digital_driver@4',1)
+    def _(a):mss['driver']=0;return None
+    @api('_AIL_enumerate_3D_providers@12',3)
+    def _(a):
+        nxt,dest,name=a[:3];i=ctx['r32'](nxt)
+        if i!=0:return 0
+        w32(nxt,1);w32(dest,PROVIDER);w32(name,mss_string(PROVIDER_NAME));return 1
+    @api('_AIL_open_3D_provider@4',1)
+    def _(a):
+        if a[0]!=PROVIDER:return 1   # M3D_NOTINIT-style failure
+        mss['provider_open']=True;return 0   # M3D_NOERR
+    @api('_AIL_close_3D_provider@4',1)
+    def _(a):mss['provider_open']=False;return None
+    @api('_AIL_set_3D_provider_preference@12',3)
+    def _(a):mss['prefs'][('3d',ctx['cstr'](a[1]))]=ctx['r32'](a[2]);return 0
+    @api('_AIL_3D_provider_attribute@12',3)
+    def _(a):
+        name=ctx['cstr'](a[1])
+        if name not in mss['prefs'] and ('3d',name) not in mss['prefs']:unsupported(f'AIL_3D_provider_attribute({name!r})')
+        w32(a[2],mss['prefs'].get(('3d',name),0));return None
+    # Room types (EAX environments): stored only; the port's mixer applies no reverb yet.
+    @api('_AIL_set_3D_room_type@8',2)
+    def _(a):mss['room']=a[1];return None
+    @api('_AIL_3D_room_type@4',1)
+    def _(a):return mss.get('room',0)
+
+    # 3D samples. AILSOUNDINFO: format, data_ptr, data_len, rate, bits, channels, samples,
+    # block_size, initial_ptr. Accepted: PCM (1) and IMA ADPCM (0x11), mono or stereo.
+    # Status: SMP_FREE 1, SMP_DONE 2, SMP_PLAYING 4, SMP_STOPPED 8. A started sample plays for
+    # its length in ms of the virtual clock (times the loop count; 0 loops = forever).
+    SMP_DONE,SMP_PLAYING,SMP_STOPPED=2,4,8
+    def sample(h):
+        s=mss['samples'].get(h)
+        if s is None:unsupported(f'unknown 3D sample handle {h:#x}')
+        return s
+    def sample_ms(s):
+        info=s.get('info')
+        if not info:return 0
+        fmt,ptr,length,rate,bits,channels,samples,block=info[:8]
+        frames=samples if fmt==0x11 else length//max(1,(bits//8)*channels)
+        return frames*1000//max(1,rate*(s['rate']/rate if s.get('rate') else 1))
+    def update(s):
+        if s['status']==SMP_PLAYING and s['loops']:
+            if state['clock']-s['started']>=sample_ms(s)*s['loops']:s['status']=SMP_DONE
+        return s['status']
+    @api('_AIL_allocate_3D_sample_handle@4',1)
+    def _(a):
+        if a[0]!=PROVIDER or not mss['provider_open']:return 0
+        live=[h for h,s in mss['samples'].items() if not s['released']]
+        if len(live)>=32:return 0
+        h=0x6F000004+4*len(mss['samples']);mss['samples'][h]={'released':False,'status':SMP_DONE,'loops':1,'volume':1.0,'pos':(0,0,0),
+                                                               'info':None,'started':0,'offset':0,'rate':0}
+        return h
+    @api('_AIL_release_3D_sample_handle@4',1)
+    def _(a):sample(a[0])['released']=True;return None
+    @api('_AIL_set_3D_sample_info@8',2)
+    def _(a):
+        s=sample(a[0]);info=[ctx['r32'](a[1]+4*i) for i in range(9)]
+        if info[0] not in (1,0x11) or info[5] not in (1,2):return 0
+        s.update(info=info,status=SMP_DONE,offset=0);return 1
+    @api('_AIL_start_3D_sample@4',1)
+    def _(a):s=sample(a[0]);s.update(status=SMP_PLAYING,started=state['clock'],offset=0);return None
+    @api('_AIL_stop_3D_sample@4',1)
+    def _(a):
+        s=sample(a[0])
+        if update(s)==SMP_PLAYING:s['status']=SMP_STOPPED;s['offset']=state['clock']-s['started']
+        return None
+    @api('_AIL_resume_3D_sample@4',1)
+    def _(a):
+        s=sample(a[0])
+        if s['status']==SMP_STOPPED:s['status']=SMP_PLAYING;s['started']=state['clock']-s['offset']
+        return None
+    @api('_AIL_end_3D_sample@4',1)
+    def _(a):sample(a[0])['status']=SMP_DONE;return None
+    @api('_AIL_3D_sample_status@4',1)
+    def _(a):return update(sample(a[0]))
+    @api('_AIL_3D_sample_length@4',1)
+    def _(a):s=sample(a[0]);return s['info'][2] if s['info'] else 0
+    @api('_AIL_3D_sample_offset@4',1)
+    def _(a):
+        s=sample(a[0])
+        if not s['info'] or update(s)!=SMP_PLAYING:return 0 if s['status']!=SMP_STOPPED else min(s['info'][2],s['offset'])
+        ms=max(1,sample_ms(s));return (s['info'][2]*((state['clock']-s['started'])%ms))//ms
+    @api('_AIL_set_3D_sample_loop_count@8',2)
+    def _(a):sample(a[0])['loops']=a[1];return None
+    @api('_AIL_set_3D_sample_loop_block@12',3)
+    def _(a):sample(a[0])['loop_block']=(a[1],a[2]);return None
+    for _n,_k in (('_AIL_set_3D_position@16',4),('_AIL_set_3D_sample_volume@8',2),('_AIL_set_3D_sample_distances@12',3),
+                  ('_AIL_set_3D_sample_effects_level@8',2),('_AIL_set_3D_sample_occlusion@8',2),('_AIL_set_3D_sample_playback_rate@8',2)):
+        def _setter(a,_n=_n):sample(a[0]).setdefault('params',{})[_n]=a[1:];return None
+        apis[_n]=(_k,_setter)
+
+    # ---- Bink video (binkw32) ---------------------------------------------------------------
+    # The port decodes .bik with a Bink decoder (FFmpeg's bink/binkaudio). In the reference a
+    # movie is opened from its real header (frames, size, frame rate) and advances on the
+    # virtual clock; frames copied to the game are black (same control flow; pixels come from
+    # the decoder on the device). BINK struct (guest): +0 Width, +4 Height, +8 Frames,
+    # +0xc FrameNum (1-based), +0x10 LastFrameNum, +0x14 FrameRate, +0x18 FrameRateDiv.
+    state.setdefault('bink',{})
+    binks=state['bink']
+    @api('_BinkSetSoundSystem@8',2)
+    def _(a):state['bink_sound']=(a[0],a[1]);return 1
+    @api('_BinkOpen@8',2)
+    def _(a):
+        name=ctx['cstr'](a[0],1024);host,err=resolve(name)
+        if host is None or not os.path.isfile(host):return 0
+        with open(host,'rb') as fp:head=fp.read(44)
+        if len(head)<44 or head[:3] not in (b'BIK',b'KB2'):return 0
+        import struct as st
+        frames,width,height,rate,div=st.unpack_from('<I',head,8)[0],*st.unpack_from('<IIII',head,20)
+        h=com_alloc(0x400)
+        for i,v in enumerate((width,height,frames,1,0,rate,div)):w32(h+4*i,v)
+        binks[h]={'name':name,'frames':frames,'rate':rate,'div':max(div,1),'start':state['clock']};return h
+    def bink(h):
+        b=binks.get(h)
+        if b is None:unsupported(f'unknown Bink handle {h:#x}')
+        return b
+    @api('_BinkBufferOpen@16',4)
+    def _(a):
+        hwnd,w,h,flags=a[:4];buf=com_alloc(0x100)
+        for i,v in enumerate((w,h,w,h)):w32(buf+4*i,v)   # Width, Height, WindowWidth, WindowHeight
+        return buf
+    @api('_BinkSetVolume@12',3)
+    def _(a):bink(a[0])['volume']=(a[1],a[2]);return None
+    @api('_BinkWait@4',1)
+    def _(a):   # 1 while the current frame is not yet due
+        b=bink(a[0]);frame=ctx['r32'](a[0]+0xc)
+        due=b['start']+(frame-1)*1000*b['div']//max(b['rate'],1)
+        return 1 if state['clock']<due else 0
+    @api('_BinkDoFrame@4',1)
+    def _(a):bink(a[0])['decoded']=ctx['r32'](a[0]+0xc);return 0
+    @api('_BinkCopyToBufferRect@44',11)
+    def _(a):
+        h,dest,pitch,dest_h,dx,dy,sx,sy,sw,sh,flags=a[:11];bink(h)
+        bpp={3:4,4:4,0xa:2,0xb:2,0xc:2,0xd:2}.get(flags&0x1f)
+        if bpp is None:unsupported(f'BinkCopyToBufferRect surface type {flags:#x}')
+        rows=min(sh,dest_h-dy) if dest_h>dy else 0
+        for r in range(rows):cpu.mem_write(dest+(dy+r)*pitch+dx*bpp,bytes(sw*bpp))
+        return 0
+    @api('_BinkNextFrame@4',1)
+    def _(a):
+        b=bink(a[0]);frame=ctx['r32'](a[0]+0xc);w32(a[0]+0x10,frame)
+        w32(a[0]+0xc,frame+1 if frame<b['frames'] else 1);return None
+    @api('_BinkClose@4',1)
+    def _(a):bink(a[0]);del binks[a[0]];return None
 
     # ---- Game functions replaced by the port (HLE) -----------------------------------------
     # 0x4becc0 probes the host's DirectX by loading DDRAW.DLL, D3D8.DLL, dpnhpast.dll and

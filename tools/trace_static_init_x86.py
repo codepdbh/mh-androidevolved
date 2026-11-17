@@ -162,8 +162,12 @@ def main():
     # Unicorn starts with FPCW=0 (24-bit precision, exceptions unmasked); a Windows process starts
     # with 0x027F (53-bit precision, all exceptions masked), which the port models.
     cpu.reg_write(UC_X86_REG_FPCW,0x027f)
-    blocks=set();cpu.hook_add(UC_HOOK_BLOCK,lambda uc,address,size,user:blocks.add(address),begin=0x401000,end=0x66e200)
-    recent=[];cpu.hook_add(UC_HOOK_BLOCK,lambda uc,address,size,user:(recent.append(address),recent.pop(0) if len(recent)>12 else None))
+    from collections import deque
+    blocks=set();recent=deque(maxlen=12)
+    def on_block(uc,address,size,user):   # one Python call per block: executed .text blocks and the last 12 blocks
+        recent.append(address)
+        if 0x401000<=address<0x66e200:blocks.add(address)
+    cpu.hook_add(UC_HOOK_BLOCK,on_block)
     # The wrapper's own code is never executed (it is filled at run time). Calls through
     # its slot are replaced by what each call site needs, as in runtime/protection_redirect.c.
     def protected(uc,address,size,user):

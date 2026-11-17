@@ -24,11 +24,14 @@ HEADER_STUB,PRUS_SLOT=0x400080,0x850000
 APIS=['EnterCriticalSection','LeaveCriticalSection','InitializeCriticalSection','DeleteCriticalSection','GlobalAlloc','GlobalFree',
       'TlsAlloc','TlsFree','TlsGetValue','TlsSetValue','GetStdHandle','GetCurrentProcess','DuplicateHandle','GetCommandLineA',
       'GetEnvironmentStrings','FreeEnvironmentStringsA','CreateEventA','GetTickCount','ExitProcess','MessageBoxA']
-def executed_closure(data,roots):
+def phase2_executed():
     trace=json.loads((ROOT/'private/analysis/static_init/trace.json').read_text(encoding='utf-8'))
     if trace['input_sha256']!=EXPECTED or trace['error'] or len(trace['completed'])!=len(STARTUP)+98:
         raise SystemExit('the x86 trace of boot phase 2 is missing or incomplete; run tools/trace_static_init_x86.py')
-    executed={int(b,16) for b in trace['executed_blocks']}
+    return {int(b,16) for b in trace['executed_blocks']}
+def executed_closure(data,roots,executed=None,skip=()):
+    """Functions reachable from `roots` that contain executed code; `skip` are provided by the port."""
+    if executed is None:executed=phase2_executed()
     analyze_pe,build_iat_map,Disassembler,_=_tools()
     info=analyze_pe(str(GAME));iat=build_iat_map(info);dis=Disassembler(data,info.image_base,info.sections)
     kept,stopped,code={}, set(), {}
@@ -41,13 +44,13 @@ def executed_closure(data,roots):
     while True:
         while pending:
             a=pending.pop(0)
-            if a in kept or a in stopped or a==HEADER_STUB:continue
+            if a in kept or a in stopped or a==HEADER_STUB or a in skip:continue
             f,ins=instructions(a)
             if not f:raise SystemExit(f'no function at {a:#x}')
             if not ins&executed:stopped.add(a);continue
             kept[a]=ins;pending.extend(sorted(f.calls_to))
         covered=set().union(*kept.values())
-        uncovered=sorted(b for b in executed if 0x401000<=b<0x66e200 and b not in covered)
+        uncovered=sorted(b for b in executed if 0x401000<=b<0x66e200 and b not in covered and b not in skip)
         if not uncovered:break
         f,ins=instructions(uncovered[0])
         if not f or uncovered[0] not in ins:raise SystemExit(f'executed code at {uncovered[0]:#x} is not a function entry')

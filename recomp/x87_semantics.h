@@ -48,6 +48,77 @@ static inline int64_t mh_x87_to_i64(double v, uint16_t cw) {
     if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) return INT64_MIN;
     return (int64_t)r;
 }
+/* fist/fistp word and dword: as mh_x87_to_i64, with the 16/32-bit integer indefinite. */
+static inline int32_t mh_x87_to_i32(double v, uint16_t cw) {
+    int64_t r = mh_x87_to_i64(v, cw);
+    return (r == INT64_MIN || r < INT32_MIN || r > INT32_MAX) ? INT32_MIN : (int32_t)r;
+}
+static inline int16_t mh_x87_to_i16(double v, uint16_t cw) {
+    int64_t r = mh_x87_to_i64(v, cw);
+    return (r == INT64_MIN || r < INT16_MIN || r > INT16_MAX) ? INT16_MIN : (int16_t)r;
+}
+/* fchs: exact sign flip (also of NaNs and zeros). */
+static inline double mh_x87_chs(double a) { return -a; }
+/* fsin/fcos/fptan: infinities are invalid (indefinite). The host reduces any finite argument,
+ * so |x| >= 2^63 (which x87 leaves unchanged with C2 set) is the one case that differs. */
+static inline double mh_x87_sin(double a) { return isinf(a) ? mh_x87_indefinite() : sin(a); }
+static inline double mh_x87_cos(double a) { return isinf(a) ? mh_x87_indefinite() : cos(a); }
+static inline double mh_x87_tan(double a) { return isinf(a) ? mh_x87_indefinite() : tan(a); }
+/* fpatan: atan2 never produces a NaN from non-NaN operands, as x87. */
+static inline double mh_x87_atan2(double y, double x) { return atan2(y, x); }
+/* fprem/fprem1 (as one complete reduction): a zero divisor or infinite dividend is invalid. */
+static inline double mh_x87_fmod(double a, double b) { return mh_x87_result(fmod(a, b), a, b); }
+/* fyl2x: st(1) * log2(st(0)). Negative x or 0*log2(0) is invalid; y*log2(0) with y != 0 is
+ * a signed infinity (division-by-zero, masked). */
+static inline double mh_x87_yl2x(double y, double x) {
+    if (x != x || y != y) return x + y;
+    if (x < 0.0 || (x == 0.0 && y == 0.0)) return mh_x87_indefinite();
+    return mh_x87_result(y * log2(x), y, x);
+}
+/* fyl2xp1: st(1) * log2(st(0) + 1), defined for |x| < 1 - sqrt(2)/2 on x87. */
+static inline double mh_x87_yl2xp1(double y, double x) {
+    if (x != x || y != y) return x + y;
+    if (x <= -1.0) return mh_x87_indefinite();
+    return mh_x87_result(y * (log1p(x) / 0.6931471805599453), y, x);
+}
+/* f2xm1: 2^x - 1 (x87 defines it for |x| <= 1; expm1 keeps the precision near 0). */
+static inline double mh_x87_f2xm1(double a) { return mh_x87_result(expm1(a * 0.6931471805599453), a, a); }
+/* fscale: st(0) * 2^trunc(st(1)), without C's undefined (int) conversion. */
+static inline double mh_x87_scale(double a, double b) {
+    if (a != a || b != b) return a + b;
+    if (isinf(b)) return mh_x87_result(b > 0 ? a * INFINITY : a * 0.0, a, b);
+    double t = trunc(b);
+    if (t > 100000.0) t = 100000.0;
+    if (t < -100000.0) t = -100000.0;
+    return ldexp(a, (int)t);
+}
+/* fld/fstp tbyte (80-bit extended) on the double stack: a load rounds to double (to nearest),
+ * a store widens exactly. NaNs keep their sign and the top fraction bits (x87 quiets them on
+ * load, as here); infinities and zeros keep their sign. */
+static inline double mh_x87_ld80(const uint8_t *p) {
+    uint64_t m, bits; uint16_t se; double v;
+    memcpy(&m, p, 8); memcpy(&se, p + 8, 2);
+    int e = se & 0x7FFF, neg = se >> 15;
+    if (e == 0x7FFF) {
+        if ((m << 1) == 0) bits = 0x7FF0000000000000ull;                                  /* infinity */
+        else bits = 0x7FF8000000000000ull | ((m << 1) >> 12);                               /* quiet NaN, payload kept */
+        bits |= (uint64_t)neg << 63; memcpy(&v, &bits, 8); return v;
+    }
+    v = ldexp((double)m, (e ? e : 1) - 16383 - 63);
+    return neg ? -v : v;
+}
+static inline void mh_x87_st80(uint8_t *p, double v) {
+    uint64_t bits, m = 0; uint16_t se;
+    memcpy(&bits, &v, 8);
+    se = (uint16_t)((bits >> 63) << 15);
+    uint64_t frac = bits & 0x000FFFFFFFFFFFFFull; int e = (int)((bits >> 52) & 0x7FF);
+    if (e == 0x7FF) { se |= 0x7FFF; m = 0x8000000000000000ull | (frac << 11); }             /* inf / NaN with payload */
+    else if (e != 0 || frac != 0) {
+        int ex; double f = frexp(fabs(v), &ex);                                               /* f in [0.5, 1) */
+        m = (uint64_t)ldexp(f, 64); se |= (uint16_t)(ex - 1 + 16383);
+    }
+    memcpy(p, &m, 8); memcpy(p + 8, &se, 2);
+}
 /* As PCRecomp's fp_st0_to_i64: while st(0) still holds the exact value an fild
  * loaded, store that integer (doubles cannot represent every int64). */
 static inline int64_t mh_x87_st0_to_i64(double v0, int64_t shadow, uint16_t cw) {
