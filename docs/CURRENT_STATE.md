@@ -4,6 +4,7 @@ El juego todavía no es jugable. La APK instalada es un diagnóstico: selecciona
 
 ## Verificado
 
+- **Arranque fase 1 (17-11):** imagen real del juego mapeada y 86/98 inicializadores estáticos ejecutados traducidos en el S25, idénticos a x86. Ver `evidence/S25_BOOT_PHASE1.md`.
 - **Heap del juego y shims Win32 de memoria (16-11):** 19 funciones; `GlobalAlloc` y secciones críticas implementadas en `runtime/win32_memory.c`. Cargador sobre la pila completa: 52 funciones, idéntico a x86 en el S25 y en la app. Ver `evidence/S25_HEAP_AND_WIN32_MEMORY.md`.
 - **Asignador del juego (16-11):** 12 funciones traducidas; 960 operaciones idénticas a x86 en Windows y S25. Integrado en el cargador (33 funciones) y en la app. Ver `evidence/S25_ALLOCATOR.md`.
 - **Cargador `0x605750` (16-11):** 21 funciones traducidas con apertura y lectura reales de solo lectura; 16 casos idénticos a x86 en el S25 y dentro de la app. Ver `evidence/S25_LOADER.md`.

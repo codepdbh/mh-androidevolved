@@ -1,5 +1,7 @@
 # Progreso
 
+2026-11-17: fase 1 del arranque. `tools/inspect_static_initializers.py`, `tools/lift_static_init.py`, `tests/static_init_native.c`, `tools/probe_static_init_x86.py`, `recomp/virtual_cpu.h`. `tools/recomp_lift.py` admite ahora llamadas indirectas despachadas, punteros a código, paradas automáticas con stubs controlados y una lista blanca cerrada de macros. 86 inicializadores idénticos a x86 en el S25.
+
 2026-11-16: módulo genérico `tools/recomp_lift.py` (traducción auditada por cierre de llamadas), heap del juego (`tools/lift_heap.py`), shims `runtime/win32_memory.c` con 18 pruebas, comparador genérico `tests/compare_harness.py` y perfiles `_validate_unit_harness()`/`test_heap()`/`test_win32_memory()`. El cargador usa ahora el heap y el asignador reales. Empaquetado de la APK unificado para todos los binarios validados.
 
 2026-11-16: traducido el asignador del juego (`tools/lift_allocator.py`, 12 funciones) con el nuevo `mh_recomp_rep_stos` comprobado. Perfiles `test_allocator()` (Windows x64 y S25) y `_run_binary_on_s25()` reutilizable. El cargador usa el asignador real. Corregidos dos fallos del arnés: un registro dentro de la arena y registros sin reiniciar antes del constructor.

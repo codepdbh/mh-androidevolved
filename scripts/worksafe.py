@@ -1564,7 +1564,7 @@ def _run_binary_on_s25(binary,label,args=''):
     Returns the program's stdout (LF). Raises on failure or unconfirmed cleanup."""
     import base64,hashlib,re,secrets,textwrap
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
-    if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or not re.fullmatch(r'(\"\$d\")?',args):raise WorkSafeError('invalid device run parameters')
+    if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or args not in ('','"$d"','/sdcard/mh-androidevolved/manhunt.exe'):raise WorkSafeError('invalid device run parameters')
     adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
     if not adb.is_file():raise WorkSafeError('adb missing')
     if binary[:4]!=b'\x7fELF' or int.from_bytes(binary[18:20],'little')!=183 or len(binary)>4*1024*1024:raise WorkSafeError('not a bounded ARM64 ELF')
@@ -1636,7 +1636,7 @@ def test_allocator(on_device=True):
             'output_sha256':hashlib.sha256(output.encode('utf-8')).hexdigest(),'compared_against':'tools/probe_allocator_x86.py'},indent=2)+'\n',encoding='utf-8')
     return results
 
-def _validate_unit_harness(name,source,runtime_sources=(),on_device=True):
+def _validate_unit_harness(name,source,runtime_sources=(),on_device=True,game_arg=False):
     """Build a portable harness for private/analysis/<name>, run it on Windows x64 and
     optionally on the S25, compare both with <name>/x86_reference.json and record the
     validated ARM64 binary for the diagnostic APK."""
@@ -1653,7 +1653,8 @@ def _validate_unit_harness(name,source,runtime_sources=(),on_device=True):
     built=_run_job([str(cl),'/nologo','/Od','/std:c11',*[x for d in includes for x in ('/I',d)],'/Fo'+str(base)+'\\','/Fe'+str(exe),
                     str(ROOT/source),'/link','/INCREMENTAL:NO'],180,f'{name}-host-build',cfg,max_processes=4,memory_mb=768,env=env)
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError(f'{name} host build failed; inspect {name}-host-build logs')
-    ran=_run_job([str(exe)],120,f'{name}-host-run',cfg,max_processes=1,memory_mb=512)
+    game=ROOT/'Manhunt Collection'/'Manhunt'/'manhunt.exe'
+    ran=_run_job([str(exe)]+([str(game)] if game_arg else []),300,f'{name}-host-run',cfg,max_processes=1,memory_mb=1024)
     if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError(f'{name} host run failed with code {ran["returncode"]}')
     def compare(path,platform):
         r=_run_job([sys.executable,str(ROOT/'tests/compare_harness.py'),str(reference),str(path),platform],120,f'{name}-{platform}-compare',cfg,max_processes=1,memory_mb=768)
@@ -1667,12 +1668,16 @@ def _validate_unit_harness(name,source,runtime_sources=(),on_device=True):
         arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',
                       *[x for d in includes for x in ('-I',d)],str(ROOT/source),'-o',str(binary)],180,f'{name}-arm64-build',cfg,max_processes=4,memory_mb=768)
         if arm['returncode']!=0 or arm['timed_out']:raise WorkSafeError(f'{name} ARM64 build failed')
-        output=_run_binary_on_s25(binary.read_bytes(),name.replace('_','-'))
+        output=_run_binary_on_s25(binary.read_bytes(),name.replace('_','-'),'/sdcard/mh-androidevolved/manhunt.exe' if game_arg else '')
         jsonl=ROOT/f'logs/{name}-arm64.jsonl';jsonl.write_text(output,encoding='utf-8')
         results['android-arm64']=compare(jsonl,'android-arm64')
         (out/'validated.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
             'output_sha256':hashlib.sha256(output.encode('utf-8')).hexdigest(),'compared_against':f'private/analysis/{name}/x86_reference.json'},indent=2)+'\n',encoding='utf-8')
     return results
+
+def test_static_init(on_device=True):
+    """Boot phase 1: map manhunt.exe and run the supported C++ static initialisers, on Windows x64 and the S25."""
+    return _validate_unit_harness('static_init','tests/static_init_native.c',on_device=on_device,game_arg=True)
 
 def test_heap(on_device=True):
     """The game's own heap (malloc 0x610be0) over the Win32 memory shims, on Windows x64 and the S25."""

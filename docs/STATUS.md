@@ -1,5 +1,7 @@
 # Estado técnico
 
+2026-11-17, más reciente — **arranque, fase 1**: el S25 lee `manhunt.exe`, lo mapea en memoria invitada como Windows y ejecuta traducidos 86 de los 98 inicializadores estáticos de C++ (417 funciones), incluida la creación del pool de 64 MiB. Coinciden con x86 en Windows y en el S25 la imagen completa, `.data`, `.bss`, la pila y la memoria reservada. Nuevas piezas: CPU virtual determinista, despacho indirecto controlado, lista blanca de macros (excluye los `jo`/`jp` falsos de PCRecomp) y paradas automáticas. Ver `docs/evidence/S25_BOOT_PHASE1.md`.
+
 2026-11-16, más reciente: el heap propio del juego (`0x610be0`, 19 funciones) funciona traducido sobre los primeros shims Win32 del port (`GlobalAlloc`, `Enter/LeaveCriticalSection`) y coincide con x86 en Windows y en el S25 (640 malloc). El cargador corre ya sobre la pila completa: cargador, asignador y heap del juego (52 funciones traducidas) más los shims de archivo y memoria, sin dobles de memoria. Es idéntico a x86 en el S25 y en la app. Ver `docs/evidence/S25_HEAP_AND_WIN32_MEMORY.md`.
 
 2026-11-16, más reciente: el asignador de memoria del juego (pool `0x67d000`: constructor, reservar y liberar; 12 funciones) está traducido y coincide con x86 en 16 casos y 960 operaciones en Windows x64 y en el S25. El cargador `0x605750` lo usa ya en lugar de dobles de prueba: 33 funciones traducidas trabajando juntas, idénticas a x86 en el S25 y dentro de la app. Ver `docs/evidence/S25_ALLOCATOR.md`.
