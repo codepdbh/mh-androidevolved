@@ -1,10 +1,12 @@
-# Estado vigente — 16 de noviembre de 2026
+# Estado vigente — 17 de noviembre de 2026
 
 El juego todavía no es jugable. La APK instalada es un diagnóstico: selecciona los archivos y examina el ejecutable mediante JNI. Las pruebas de rutinas traducidas se ejecutan en un arnés aislado; no son el arranque del juego.
 
 ## Verificado
 
-- **Bloqueo (17-11):** el arranque llega a la frontera de la protección del ejecutable y se detiene por política; ver `BOOT_PROTECTION_BLOCKER.md`.
+- **Protección sustituida en la referencia x86 (17-11):** las 91 llamadas por el stub de cabecera se resuelven exactamente desde su tabla; de las 37 de la ranura `.prus`, 14 son `GetLastError` y 7 validaciones de puntero (sustituidas), y 16 son disparadores antimanipulación pendientes. Con el arranque real de la CRT (`0x64a380` → `0x655490`), los 98 inicializadores estáticos completan en x86 (antes 10). El código traducido sigue en la fase 1; ver `BOOT_PROTECTION_BLOCKER.md`.
+- **Arranque fase 2 traducido (17-11):** la inicialización de la CRT y los 98 inicializadores estáticos (338 funciones, 12 494 instrucciones, x87 incluido) se ejecutan traducidos, pasando por las redirecciones de la protección sin ejecutar el *wrapper*. Coinciden con x86 en registros, API, TLS, `.data`, `.bss`, imagen, pila, heap y FPU en Windows x64 y en el S25. Ver `evidence/BOOT_PHASE2.md`.
+- **Direct3D 8 (17-11):** shim `IDirect3D8` en memoria del invitado. El selector de refresco `0x4c0830`, traducido, coincide con x86 en 48 casos en Windows x64 y en el S25. La fase 1 del arranque se repitió en el S25 sin regresiones. Ver `evidence/S25_GRAPHICS_D3D8.md`.
 - **Arranque fase 1 (17-11):** imagen real del juego mapeada y 86/98 inicializadores estáticos ejecutados traducidos en el S25, idénticos a x86. Ver `evidence/S25_BOOT_PHASE1.md`.
 - **Heap del juego y shims Win32 de memoria (16-11):** 19 funciones; `GlobalAlloc` y secciones críticas implementadas en `runtime/win32_memory.c`. Cargador sobre la pila completa: 52 funciones, idéntico a x86 en el S25 y en la app. Ver `evidence/S25_HEAP_AND_WIN32_MEMORY.md`.
 - **Asignador del juego (16-11):** 12 funciones traducidas; 960 operaciones idénticas a x86 en Windows y S25. Integrado en el cargador (33 funciones) y en la app. Ver `evidence/S25_ALLOCATOR.md`.

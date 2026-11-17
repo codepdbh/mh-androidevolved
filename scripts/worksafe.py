@@ -1679,6 +1679,14 @@ def test_static_init(on_device=True):
     """Boot phase 1: map manhunt.exe and run the supported C++ static initialisers, on Windows x64 and the S25."""
     return _validate_unit_harness('static_init','tests/static_init_native.c',on_device=on_device,game_arg=True)
 
+def test_boot_phase2(on_device=True):
+    """Boot phase 2: CRT start-up and all 98 static initialisers translated, past the protection, on Windows x64 and the S25."""
+    return _validate_unit_harness('boot_phase2','tests/boot_phase2_native.c',on_device=on_device,game_arg=True)
+
+def test_graphics_d3d8(on_device=True):
+    """The game's refresh-rate selector over the port's Direct3D 8 shim, on Windows x64 and the S25."""
+    return _validate_unit_harness('graphics_d3d8','tests/graphics_d3d8_native.c',on_device=on_device)
+
 def test_heap(on_device=True):
     """The game's own heap (malloc 0x610be0) over the Win32 memory shims, on Windows x64 and the S25."""
     return _validate_unit_harness('heap','tests/heap_native.c',on_device=on_device)
@@ -2168,6 +2176,31 @@ def test_win32_memory():
     ran=_run_job([str(exe)],30,'win32-memory-run',cfg,max_processes=1,memory_mb=256)
     if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError('win32 memory test failed with code '+str(ran['returncode']))
     return {'build':built,'run':ran}
+
+def _host_unit_test(name,sources):
+    """Compile `sources` (repo-relative) with MSVC /W4 and run the resulting synthetic test; no game code."""
+    import re
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
+    if not re.fullmatch(r'[a-z0-9-]{1,32}',name):raise WorkSafeError('invalid test name')
+    if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
+    cl,env=_msvc_env()
+    output=ROOT/'build'/f'{name}-test';output.mkdir(parents=True,exist_ok=True);exe=output/f'{name}-test.exe'
+    argv=[str(cl),'/nologo','/Od','/std:c11','/W4','/I',str(ROOT/'runtime'),'/I',str(ROOT/'recomp'),'/Fo'+str(output)+'\\','/Fe'+str(exe),
+          *[str(ROOT/s) for s in sources],'/link','/INCREMENTAL:NO']
+    built=_run_job(argv,60,f'{name}-build',cfg,max_processes=4,memory_mb=512,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError(f'{name} test build failed; inspect {name}-build logs')
+    ran=_run_job([str(exe)],30,f'{name}-run',cfg,max_processes=1,memory_mb=256)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError(f'{name} test failed with code {ran["returncode"]}')
+    return Path(ran['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip()
+
+def test_d3d8():
+    """Synthetic checks of the Direct3D 8 shim on the host."""
+    return _host_unit_test('d3d8',['tests/test_d3d8.c','runtime/d3d8.c','runtime/guest_memory.c'])
+
+def test_protection_redirect():
+    """Synthetic checks of the Win32 thread state and the protection-redirect replacement on the host."""
+    return _host_unit_test('protection-redirect',['tests/test_protection_redirect.c','runtime/win32_thread.c','runtime/protection_redirect.c','runtime/guest_memory.c'])
 
 def test_x87_semantics():
     """Compile and run synthetic checks of the x87 arithmetic helpers on the host; no game code."""

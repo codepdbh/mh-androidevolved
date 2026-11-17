@@ -28,6 +28,17 @@ void mh_dispatch_fault(uint32_t target, uint32_t caller);
     RECOMP_REGS_IN(); g_cur_func = mh_caller_; \
 } while (0)
 
+/* Audited `jmp dword ptr [slot]` (an import thunk): a tail jump with the caller's
+ * return address still on the stack; the callee returns for this function. */
+#define MH_RECOMP_IJMP_AT(target_va) do { \
+    uint32_t mh_target_ = (uint32_t)(target_va); \
+    RECOMP_ICALL_TRACE(mh_target_); \
+    recomp_func_t mh_fn_ = RECOMP_RESOLVE_SITE(mh_target_); \
+    if (!mh_fn_) { mh_dispatch_fault(mh_target_, g_cur_func); abort(); } \
+    RECOMP_FLAGS_OUT(); RECOMP_REGS_OUT(); \
+    mh_fn_(); \
+} while (0)
+
 #undef RECOMP_ICALL
 #define RECOMP_ICALL(target_va) do { \
     uint32_t mh_target_ = (uint32_t)(target_va); \

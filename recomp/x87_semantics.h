@@ -15,6 +15,7 @@
  *
  * Arithmetic is still done in host double precision, not 80-bit extended, and
  * the precision-control field is not modelled. */
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -31,4 +32,25 @@ static inline double mh_x87_add(double a, double b) { return mh_x87_result(a + b
 static inline double mh_x87_sub(double a, double b) { return mh_x87_result(a - b, a, b); }
 static inline double mh_x87_mul(double a, double b) { return mh_x87_result(a * b, a, b); }
 static inline double mh_x87_div(double a, double b) { return mh_x87_result(a / b, a, b); }
+/* fsqrt: a negative operand (not -0) is invalid and yields the indefinite. */
+static inline double mh_x87_sqrt(double a) { return a < 0.0 ? mh_x87_indefinite() : sqrt(a); }
+/* fistp qword: round by the control word's RC field (bits 10-11). NaN, infinities
+ * and results outside int64 give the x87 "integer indefinite" 0x8000000000000000
+ * (C's conversion would be undefined behaviour). */
+static inline int64_t mh_x87_to_i64(double v, uint16_t cw) {
+    double r;
+    switch ((cw >> 10) & 3) {
+    case 0: r = nearbyint(v); break;
+    case 1: r = floor(v); break;
+    case 2: r = ceil(v); break;
+    default: r = trunc(v); break;
+    }
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) return INT64_MIN;
+    return (int64_t)r;
+}
+/* As PCRecomp's fp_st0_to_i64: while st(0) still holds the exact value an fild
+ * loaded, store that integer (doubles cannot represent every int64). */
+static inline int64_t mh_x87_st0_to_i64(double v0, int64_t shadow, uint16_t cw) {
+    return v0 == (double)shadow ? shadow : mh_x87_to_i64(v0, cw);
+}
 #endif

@@ -9,6 +9,12 @@ PCRecomp revision and applies only these verified rewrites:
 - `recomp_rep_movs` -> bounds-checked mh_recomp_rep_movs.
 Anything else that is unsafe or unsupported (raw ADDR, x87, unknown runtime
 helpers, other indirect calls, RECOMP_TODO) aborts the translation.
+With x87=True, x87 code is admitted through audited rewrites (_x87_rewrite):
+typed raw accesses become checked MEMF/MEMD, arithmetic, fsqrt and fistp go
+through recomp/x87_semantics.h, and only a closed list of PCRecomp x87 stack
+helpers may remain. `dispatch_slots` are non-import memory slots whose calls
+are dispatched by their run-time value (the protection's .prus slot). `provided` lists call targets the harness/runtime
+implements (e.g. the header-stub replacement): no fail-closed stub for them.
 The executable hash and the PCRecomp revision are verified first; output and
 report go to private/analysis/<name>/ and are never published.
 """
@@ -17,10 +23,10 @@ import pefile
 from capstone import Cs,CS_ARCH_X86,CS_MODE_32
 from inspect_entrypoint import ROOT,GAME,PCRECOMP,EXPECTED,REVISION
 ALLOWED={'MEM8','MEM16','MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}
-PURE_HELPERS={'recomp_flags_pack','recomp_eflags'}  # pure functions of their arguments
+PURE_HELPERS={'recomp_flags_pack','recomp_eflags','recomp_eflags_setcf','recomp_flags_adc','recomp_flags_sbb'}  # pure functions of their arguments
 # Closed list of macros allowed in translated code; any other uppercase macro call aborts.
 MACROS={'MEM8','MEM16','MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT',
-        'MH_RECOMP_CALL_AT','MH_RECOMP_ICALL_AT','MH_VIRTUAL_CPUID','FK_NARROW','LO8','LO16','HI8','SET_LO8','SET_LO16','SET_HI8','BSWAP32',
+        'MH_RECOMP_CALL_AT','MH_RECOMP_ICALL_AT','MH_RECOMP_IJMP_AT','MH_VIRTUAL_CPUID','FK_NARROW','LO8','LO16','HI8','SET_LO8','SET_LO16','SET_HI8','BSWAP32',
         'CMP_EQ','CMP_NE','CMP_B','CMP_BE','CMP_A','CMP_AE','CMP_L','CMP_LE','CMP_G','CMP_GE','CMP_S','CMP_NS',
         'TEST_Z','TEST_NZ','TEST_S','TEST_NS','TEST_G','TEST_LE'}
 # Deliberately absent: CMP_O/CMP_NO/CMP_P/CMP_NP are TODO stubs in PCRecomp (constant results), so jo/jno/jp/jnp abort.
@@ -31,6 +37,34 @@ STOS=re.compile(r'\{ uint32_t _n = ecx, _b = _n \* ([124])u; /\* (0x[0-9A-F]{8}:
                 r'if \(_df > 0\) \{ (?:memset|MEMSET16|MEMSET32)\(\(void\*\)ADDR\(edi\), (?:LO8\(eax\)|LO16\(eax\)|eax), _n\); edi \+= _b; \} '
                 r'else \{ (?:memset|MEMSET16|MEMSET32)\(\(void\*\)ADDR\(edi - _b \+ \1u\), (?:LO8\(eax\)|LO16\(eax\)|eax), _n\); edi -= _b; \} ecx = 0; \}')
 
+X87_HELPERS={'fp_push','fp_pop','fp_push_i64','fp_round_cw'}
+X87_OPS={'+':'mh_x87_add','-':'mh_x87_sub','*':'mh_x87_mul','/':'mh_x87_div'}
+X87_LIBM=re.compile(r'\b(sqrt|fabs|floor|ceil|trunc|nearbyint|rint|round|fmod|pow|ldexp|frexp|log\w*|exp\w*|sin|cos|tan|atan\w*|fp_\w+)\s*\(')
+X87_ARITH_LEFT=re.compile(r'_st\[\d\]\s*[-+*/]=|[-+*/]\s*(?:\(double\)\s*)?_st\[|_st\[\d\]\s*[-+*/](?!=)|\b_v\s*[-+*/]|[-+*/]\s*_v\b')
+def _x87_rewrite(source,address):
+    """Audited rewrites of PCRecomp's x87 output. Returns (source, {rewrite: count})."""
+    counts={}
+    def count(key,n):
+        if n:counts[key]=counts.get(key,0)+n
+    for old,new in (('*(float*)ADDR(','MEMF('),('*(double*)ADDR(','MEMD('),('*(float*)&MEM32(','MEMF('),('*(double*)&MEM64(','MEMD(')):
+        count('checked float access',source.count(old));source=source.replace(old,new)
+    # st(i) op= rhs  ->  st(i) = helper(st(i), rhs)
+    source,n=re.subn(r'_st\[(\d)\] ([-+*/])= ([^;]+);',lambda m:f'_st[{m.group(1)}] = {X87_OPS[m.group(2)]}(_st[{m.group(1)}], {m.group(3)});',source)
+    count('x87 arithmetic',n)
+    # reverse forms (fsubr/fdivr): st(i) = rhs op st(i)
+    def reverse(m):
+        if m.group(1)!=m.group(4):raise SystemExit(f'unexpected reverse x87 form at {address:#x}')
+        return f'_st[{m.group(1)}] = {X87_OPS[m.group(3)]}({m.group(2)}, _st[{m.group(4)}]);'
+    source,n=re.subn(r'_st\[(\d)\] = ([^;=]+?) ([-/]) _st\[(\d)\];',reverse,source);count('x87 reverse arithmetic',n)
+    source,n=re.subn(r'\bsqrt\(_st\[0\]\)','mh_x87_sqrt(_st[0])',source);count('fsqrt',n)
+    source,n=re.subn(r'\bfp_st0_to_i64\(','mh_x87_st0_to_i64(',source);count('fistp qword',n)
+    code=re.sub(r'/\*.*?\*/','',source,flags=re.DOTALL)
+    if X87_ARITH_LEFT.search(code):raise SystemExit(f'x87 arithmetic left without helper at {address:#x}')
+    left={m.group(1) for m in X87_LIBM.finditer(code)}-X87_HELPERS
+    if left:raise SystemExit(f'unaudited x87/libm calls at {address:#x}: '+','.join(sorted(left)))
+    if re.search(r'\(float\*\)|\(double\*\)|\bADDR\(',code):raise SystemExit(f'unchecked float access left at {address:#x}')
+    return source,counts
+
 def _tools():
     for part in ('pe','disasm','lift'):sys.path.insert(0,str(PCRECOMP/'tools'/part))
     from pe_analyze import analyze_pe,build_iat_map
@@ -38,7 +72,7 @@ def _tools():
     from lift32 import Lifter
     return analyze_pe,build_iat_map,Disassembler,Lifter
 
-def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_code_pointers=False,auto_stop=False):
+def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_code_pointers=False,auto_stop=False,x87=False,provided=(),dispatch_slots=()):
     data=GAME.read_bytes()
     if hashlib.sha256(data).hexdigest()!=EXPECTED:raise SystemExit('unexpected executable hash')
     if (PCRECOMP/'REVISION.txt').read_text(encoding='ascii').strip()!=REVISION:raise SystemExit('unexpected tool revision')
@@ -80,16 +114,19 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
         lifted=hashlib.sha256(source.encode()).hexdigest();sites=[];rewrites=[];used=set()
         def direct(m):
             target=int(m.group(1),16);site=int(m.group(2),16)
-            if target!=int(m.group(3),16) or target not in func.calls_to:raise SystemExit(f'call target mismatch at {site:#x}')
+            if target!=int(m.group(3),16) or (target not in func.calls_to and target not in provided):raise SystemExit(f'call target mismatch at {site:#x}')
             ins=list(decoder.disasm(pe.get_data(site-base,5),site,count=1))
             if len(ins)!=1 or ins[0].mnemonic!='call' or ins[0].size!=5 or int(ins[0].op_str,16)!=target:raise SystemExit(f'call decoding mismatch at {site:#x}')
             sites.append({'call':hex(site),'target':hex(target),'return':hex(site+5)})
             return f'MH_RECOMP_CALL_AT(sub_{target:08X}, 0x{site+5:08X}u);'
         def indirect_import(m):
             slot=int(m.group(1),16);site=int(m.group(2),16)
-            if slot!=int(m.group(3),16) or slot not in imports:raise SystemExit(f'indirect call through {slot:#x} at {site:#x} is not an allowed import')
+            if slot!=int(m.group(3),16) or (slot not in imports and slot not in dispatch_slots):raise SystemExit(f'indirect call through {slot:#x} at {site:#x} is not an allowed import')
             ins=list(decoder.disasm(pe.get_data(site-base,6),site,count=1))
             if len(ins)!=1 or ins[0].mnemonic!='call' or ins[0].size!=6 or ins[0].bytes[:2]!=b'\xff\x15':raise SystemExit(f'import call decoding mismatch at {site:#x}')
+            if slot in dispatch_slots:  # dispatched by the slot's run-time value, with the exact return address
+                sites.append({'call':hex(site),'slot':hex(slot),'dispatch':True,'return':hex(site+6)})
+                return f'MH_RECOMP_ICALL_AT(MEM32(0x{slot:X}), 0x{site+6:08X}u);'
             used.add(slot);sites.append({'call':hex(site),'import':names[slot],'slot':hex(slot),'return':hex(site+6)})
             return f'MH_RECOMP_ICALL_AT(MEM32(0x{slot:X}), 0x{site+6:08X}u);'
         def stos(m):
@@ -107,22 +144,34 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
             if len(ins)!=1 or ins[0].mnemonic!='call' or ins[0].bytes[0]!=0xff:raise SystemExit(f'indirect call decoding mismatch at {site:#x}')
             sites.append({'call':hex(site),'indirect':ins[0].op_str,'return':hex(site+ins[0].size)})
             return f'MH_RECOMP_ICALL_AT({expr}, 0x{site+ins[0].size:08X}u);'
+        def import_jump(m):
+            slot=int(m.group(1),16);site=int(m.group(2),16)
+            if slot!=int(m.group(3),16) or slot not in imports:raise SystemExit(f'jump through {slot:#x} at {site:#x} is not an allowed import')
+            ins=list(decoder.disasm(pe.get_data(site-base,6),site,count=1))
+            if len(ins)!=1 or ins[0].mnemonic!='jmp' or ins[0].size!=6 or ins[0].bytes[:2]!=b'\xff\x25':raise SystemExit(f'import jump decoding mismatch at {site:#x}')
+            used.add(slot);sites.append({'jump':hex(site),'import':names[slot],'slot':hex(slot)})
+            return f'MH_RECOMP_IJMP_AT(MEM32(0x{slot:X})); return;'
         source=CALL.sub(direct,source);source=ICALL.sub(indirect_import,source)
+        source=re.sub(r'RECOMP_ITAIL\(MEM32\(0x([0-9A-F]+)\)\); return; /\* 0x([0-9A-F]{8}): jmp dword ptr \[0x([0-9a-f]+)\] \*/',import_jump,source)
         source=re.sub(r'RECOMP_ICALL\(([^;]*?)\); /\* 0x([0-9A-F]{8}): call [^*]*\*/',dynamic,source)
         source=STOS.sub(stos,source)
         source,n=re.subn(r'\brecomp_rep_movs\(','mh_recomp_rep_movs(',source)
         if n:rewrites.append(f'{n} rep movs')
         n=source.count(CPUID)
         if n:source=source.replace(CPUID,'MH_VIRTUAL_CPUID();');rewrites.append(f'{n} cpuid -> virtual CPU')
+        if x87:
+            source,counts=_x87_rewrite(source,address)
+            rewrites.extend(f'{v} {k}' for k,v in counts.items())
         code_only=re.sub(r'/\*.*?\*/','',source,flags=re.DOTALL)  # validate code, not PCRecomp's comments
-        left=re.findall(r'\bADDR\(|\bmemset\(|\bmemcpy\(|MEMSET\d*\(|RECOMP_CALL\(|RECOMP_ICALL\(|RECOMP_JMP\w*|\bfp_\w+\(|\b_st\[|\bg_st\b',code_only)
+        forbidden=r'\bADDR\(|\bmemset\(|\bmemcpy\(|MEMSET\d*\(|RECOMP_CALL\(|RECOMP_ICALL\(|RECOMP_JMP\w*'+('' if x87 else r'|\bfp_\w+\(|\b_st\[|\bg_st\b')
+        left=re.findall(forbidden,code_only)
         if left:raise SystemExit(f'unsupported or unchecked construct left at {address:#x}: '+', '.join(sorted(set(left))))
-        macros=set(re.findall(r'\b([A-Z][A-Z0-9_]+)\s*\(',code_only))-MACROS
+        macros=set(re.findall(r'\b([A-Z][A-Z0-9_]+)\s*\(',code_only))-MACROS-({'MEMF','MEMD','MEM64','FPU_CMP'} if x87 else set())
         if macros:raise SystemExit(f'macros outside the audited list at {address:#x}: '+','.join(sorted(macros)))
         helpers=set(re.findall(r'\b(recomp_\w+)\s*\(',code_only))
         if not helpers.issubset(PURE_HELPERS):raise SystemExit(f'unchecked runtime helpers at {address:#x}: '+','.join(sorted(helpers-PURE_HELPERS)))
         operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',code_only))
-        if not operations.issubset(ALLOWED):raise SystemExit(f'unsupported operations at {address:#x}: '+','.join(sorted(operations-ALLOWED)))
+        if not operations.issubset(ALLOWED|({'MEMF','MEMD','MEM64'} if x87 else set())):raise SystemExit(f'unsupported operations at {address:#x}: '+','.join(sorted(operations-ALLOWED)))
         return source,dict({'address':hex(address),'instructions':len(instructions),'range':[hex(start),hex(end)],
                       'bytes_sha256':hashlib.sha256(pe.get_data(start-base,end-start)).hexdigest(),'lifted_sha256':lifted,
                       'sites':sites,'rewrites':rewrites,'operations':sorted(operations)}),used
@@ -152,10 +201,10 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
     (out/f'{name}_unit.c').write_text(unit,encoding='utf-8',newline='\n')
     (out/f'{name}_dispatch.h').write_text(dispatch,encoding='utf-8',newline='\n')
     # Fail-closed stubs for functions referenced but not translated (stop points).
-    unresolved=sorted(declared-set(lifted))
+    unresolved=sorted(declared-set(lifted)-set(provided))
     (out/f'{name}_unresolved.h').write_text('/* Generated by tools/recomp_lift.py; private. Reaching one of these is an error. */\n'
         +''.join(f'void sub_{a:08X}(void){{mh_dispatch_fault(0x{a:x}u,g_cur_func);abort();}}\n' for a in unresolved),encoding='utf-8',newline='\n')
     report={'input_sha256':EXPECTED,'pcrecomp_revision':REVISION,'roots':[hex(r) for r in roots],'stop':[hex(s) for s in sorted(stop)],
-            'imports':{hex(s):names[s] for s in sorted(used_imports)},'code_pointers':[hex(a) for a in sorted(pointers)],'unresolved':[hex(a) for a in unresolved],'auto_stopped':{hex(a):why for a,why in sorted(stopped.items())},'items':items,'unit_sha256':hashlib.sha256(unit.encode()).hexdigest()}
+            'imports':{hex(s):names[s] for s in sorted(used_imports)},'code_pointers':[hex(a) for a in sorted(pointers)],'unresolved':[hex(a) for a in unresolved],'provided':[hex(a) for a in sorted(provided)],'x87':x87,'auto_stopped':{hex(a):why for a,why in sorted(stopped.items())},'items':items,'unit_sha256':hashlib.sha256(unit.encode()).hexdigest()}
     (out/f'{name}_report.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
     return report

@@ -32,6 +32,20 @@ int mh_x87_semantic_checks(void) {
         CHECK((bits64(mh_x87_add(payload, one)) & 0x000FFFFFFFFFFFFFull) == 0x0008000000001234ull);
         CHECK((bits64(mh_x87_mul(one, payload)) & 0x000FFFFFFFFFFFFFull) == 0x0008000000001234ull);
     }
+    /* fsqrt */
+    CHECK(mh_x87_sqrt(9.0) == 3.0 && bits64(mh_x87_sqrt(-zero)) == 0x8000000000000000ull);
+    CHECK(bits64(mh_x87_sqrt(-one)) == 0xFFF8000000000000ull);
+    CHECK(bits64(mh_x87_sqrt(-inf)) == 0xFFF8000000000000ull && mh_x87_sqrt(inf) == inf);
+    /* fistp qword: rounding control and the integer indefinite */
+    CHECK(mh_x87_to_i64(2.5, 0x037f) == 2 && mh_x87_to_i64(3.5, 0x037f) == 4 && mh_x87_to_i64(-2.5, 0x037f) == -2);
+    CHECK(mh_x87_to_i64(2.7, 0x077f) == 2 && mh_x87_to_i64(-2.2, 0x077f) == -3);   /* down */
+    CHECK(mh_x87_to_i64(2.2, 0x0b7f) == 3 && mh_x87_to_i64(-2.7, 0x0b7f) == -2);   /* up */
+    CHECK(mh_x87_to_i64(2.7, 0x0f7f) == 2 && mh_x87_to_i64(-2.7, 0x0f7f) == -2);   /* chop */
+    CHECK(mh_x87_to_i64(zero / zero, 0x037f) == INT64_MIN && mh_x87_to_i64(inf, 0x037f) == INT64_MIN);
+    CHECK(mh_x87_to_i64(9.3e18, 0x037f) == INT64_MIN && mh_x87_to_i64(-9223372036854775808.0, 0x037f) == INT64_MIN);
+    CHECK(mh_x87_to_i64(-9.2e18, 0x037f) == -9200000000000000000ll);
+    CHECK(mh_x87_st0_to_i64((double)9007199254740993ll, 9007199254740993ll, 0x037f) == 9007199254740993ll);  /* shadow kept */
+    CHECK(mh_x87_st0_to_i64(1.5, 7, 0x037f) == 2);
     printf("%u x87 semantic checks passed\n", checks);
     return 0;
 }
