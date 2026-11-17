@@ -1,5 +1,7 @@
 # Problemas conocidos
 
+- **Bloqueo del arranque por protección:** el punto de entrada y una entrada de tabla usada 37 veces por la CRT están en secciones de un *wrapper* que se rellena en tiempo de ejecución. No se eludirá; continuar el arranque requiere un ejecutable oficial sin ese *wrapper*. Ver `docs/BOOT_PROTECTION_BLOCKER.md`.
+
 - PCRecomp implementa `CMP_O`/`CMP_NO`/`CMP_P`/`CMP_NP` como `TODO` con resultado constante y su `CPUID` depende del host o no hace nada fuera de MSVC. El traductor rechaza lo primero y sustituye lo segundo por la CPU virtual de `recomp/virtual_cpu.h`. La CPU virtual no anuncia MMX/SSE: si el juego exigiera esas extensiones, habría que traducir sus instrucciones.
 
 - Banderas indefinidas: tras `IMUL`, Intel no define SF/ZF/AF/PF, y el C traducido y Unicorn pueden diferir ahí. El comparador del asignador solo exige CF/OF en esos casos. Si algún código del juego dependiera de banderas indefinidas, la traducción no garantizaría el valor del hardware real.
