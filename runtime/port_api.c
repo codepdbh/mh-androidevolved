@@ -93,6 +93,7 @@ struct mh_port {
     uint32_t res_next;
     unsigned frames;
     uint64_t tsc_reads;
+    mh_port_renderer renderer; int has_renderer; struct com_obj *device;
     /* Miles */
     uint32_t mss_redist, mss_scratch, mss_driver; int mss_provider_open, mss_started;
     struct { uint32_t k, v; } prefs[32]; unsigned nprefs;
@@ -511,14 +512,25 @@ static uint32_t dv_set_vs(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (
 static uint32_t dv_set_ps(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)o; (void)h; if (a[1]) fail(P, "SetPixelShader with a shader (the port reports no pixel shaders)"); return D3D_OK; }
 static uint32_t dv_begin(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)a; (void)h; if (o->scene) return D3DERR_INVALIDCALL; o->scene = 1; return D3D_OK; }
 static uint32_t dv_end(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)a; (void)h; if (!o->scene) return D3DERR_INVALIDCALL; o->scene = 0; return D3D_OK; }
-static uint32_t dv_clear(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)a; (void)h; o->clears++; return D3D_OK; }
+static uint32_t dv_clear(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
+    (void)h; o->clears++;
+    if (P->has_renderer && P->renderer.clear) { float z; memcpy(&z, &a[5], 4); P->renderer.clear(P->renderer.user, P, a[1], a[2], a[3], a[4], z, a[6]); }
+    return D3D_OK;
+}
 static uint32_t dv_present(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     (void)a; (void)h; o->frames++; P->frames = o->frames;
+    if (P->has_renderer && P->renderer.present) P->renderer.present(P->renderer.user, P, P->frames);
     if (P->frames >= P->frame_limit) P->host.frames_reached(P->host.user, P->frames);
     return D3D_OK;
 }
-#define DRAW(n, i) static uint32_t n(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)a; (void)h; if (!o->scene) return D3DERR_INVALIDCALL; o->draws[i]++; return D3D_OK; }
-DRAW(dv_draw0, 0) DRAW(dv_draw1, 1) DRAW(dv_draw2, 2) DRAW(dv_draw3, 3)
+static void notify_draw(mh_port *P, int kind, const uint32_t *a, unsigned nargs) {
+    if (!P->has_renderer || !P->renderer.draw) return;
+    mh_port_draw_call c; memset(&c, 0, sizeof c); c.kind = kind; c.primitive = a[1];
+    for (unsigned i = 2; i < nargs && i - 2 < 8; i++) c.args[i - 2] = a[i];
+    P->renderer.draw(P->renderer.user, P, &c);
+}
+#define DRAW(n, i, nargs) static uint32_t n(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)h; if (!o->scene) return D3DERR_INVALIDCALL; o->draws[i]++; notify_draw(P, i, a, nargs); return D3D_OK; }
+DRAW(dv_draw0, 0, 4) DRAW(dv_draw1, 1, 6) DRAW(dv_draw2, 2, 5) DRAW(dv_draw3, 3, 9)
 static uint32_t dv_ok(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)o; (void)a; (void)h; return D3D_OK; }
 static uint32_t dv_texmem(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)o; (void)a; (void)h; return 256u << 20; }
 static uint32_t dv_validate(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)o; (void)h; w32(P, a[1], 1); return D3D_OK; }
@@ -658,7 +670,7 @@ static uint32_t d3d_create_device(mh_port *P, com_obj *o, const uint32_t *a, int
     if (!presentation(P, ppp, hwnd, &p, &hr)) return hr;
     p.flags = flags;
     com_obj *dev = new_object(P, iface_for(P, K_DEVICE));
-    dev->params = p; attach_buffers(P, dev); w32(P, out, dev->addr); return D3D_OK;
+    dev->params = p; attach_buffers(P, dev); P->device = dev; w32(P, out, dev->addr); return D3D_OK;
 }
 static const com_method D3D8_METHODS[] = {
     {"QueryInterface",3,d3d_qi},{"AddRef",1,addref},{"Release",1,release},{"RegisterSoftwareDevice",2,0},{"GetAdapterCount",1,d3d_count},
@@ -1363,3 +1375,55 @@ uint32_t mh_port_com_next(const mh_port *P) { return P->com_next; }
 uint32_t mh_port_res_next(const mh_port *P) { return P->res_next; }
 mh_win32_global_heap *mh_port_global(mh_port *P);
 mh_win32_global_heap *mh_port_global(mh_port *P) { return &P->global; }
+
+/* ---------------------------------------------------------------- renderer interface */
+void mh_port_set_renderer(mh_port *P, const mh_port_renderer *r) { if (r) { P->renderer = *r; P->has_renderer = 1; } else P->has_renderer = 0; }
+int mh_port_device_size(mh_port *P, uint32_t *w, uint32_t *h) { if (!P->device) return 0; *w = P->device->params.width; *h = P->device->params.height; return 1; }
+uint32_t mh_port_render_state(mh_port *P, uint32_t s) {
+    int known; uint32_t d = rs_default(P, s, &known);
+    return P->device && s < 256 && P->device->rs_set[s] ? P->device->rs[s] : d;
+}
+uint32_t mh_port_stage_state(mh_port *P, uint32_t stage, uint32_t t) {
+    if (stage >= 8 || t >= 32) return 0;
+    if (P->device && P->device->tss_set[stage][t]) return P->device->tss[stage][t];
+    switch (t) { case 12: case 29: case 30: case 31: case 0: return 0; default: return tss_default(P, stage, t); }
+}
+int mh_port_transform(mh_port *P, uint32_t index, float m[16]) {
+    static const float identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    memcpy(m, identity, sizeof identity);
+    if (!P->device) return 0;
+    for (unsigned i = 0; i < P->device->ntransforms; i++) if (P->device->transforms[i].index == index) { memcpy(m, P->device->transforms[i].m, 64); return 1; }
+    return 0;
+}
+void mh_port_viewport(mh_port *P, uint32_t v[6]) {
+    com_obj *d = P->device;
+    if (d && d->has_viewport) { memcpy(v, d->viewport, 24); return; }
+    v[0] = 0; v[1] = 0; v[2] = d ? d->params.width : 0; v[3] = d ? d->params.height : 0; v[4] = F(0.0f); v[5] = F(1.0f);
+}
+uint32_t mh_port_fvf(mh_port *P) { return P->device ? P->device->vertex_shader : 0; }
+int mh_port_texture(mh_port *P, uint32_t stage, mh_port_texture_info *info) {
+    if (!P->device || stage >= 8 || !P->device->textures[stage]) return 0;
+    com_obj *t = object(P, P->device->textures[stage]);
+    if (!t || t->kind != K_TEXTURE) return 0;
+    memset(info, 0, sizeof *info); info->format = t->format; info->width = t->levels[0].width; info->height = t->levels[0].height; info->levels = t->nlevels;
+    for (unsigned i = 0; i < t->nlevels; i++) {
+        info->memory[i] = t->levels[i].memory; info->pitch[i] = t->levels[i].pitch; info->level_width[i] = t->levels[i].width;
+        info->level_height[i] = t->levels[i].height; info->version[i] = t->levels[i].version;
+    }
+    return 1;
+}
+int mh_port_stream(mh_port *P, uint32_t stream, uint32_t *memory, uint32_t *length, uint32_t *stride) {
+    if (!P->device) return 0;
+    for (unsigned i = 0; i < P->device->nstreams; i++) if (P->device->streams[i].stream == stream) {
+        com_obj *b = object(P, P->device->streams[i].buffer);
+        if (!b || b->kind != K_VBUF) return 0;
+        *memory = b->memory; *length = b->length; *stride = P->device->streams[i].stride; return 1;
+    }
+    return 0;
+}
+int mh_port_indices(mh_port *P, uint32_t *memory, uint32_t *length, uint32_t *format, uint32_t *base_vertex) {
+    if (!P->device || !P->device->indices[0]) return 0;
+    com_obj *b = object(P, P->device->indices[0]);
+    if (!b || b->kind != K_IBUF) return 0;
+    *memory = b->memory; *length = b->length; *format = b->format; *base_vertex = P->device->indices[1]; return 1;
+}

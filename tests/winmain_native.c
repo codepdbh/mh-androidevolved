@@ -16,6 +16,7 @@
 #include "../runtime/win32_process.c"
 #include "../runtime/protection_redirect.c"
 #include "../runtime/port_api.c"
+#include "../runtime/sw_renderer.c"
 #include "recomp_types.h"
 #include "checked_memory_adapter.h"
 #include "checked_dispatch_adapter.h"
@@ -177,6 +178,10 @@ int main(int argc,char **argv){
     const mh_port_host host={NULL,host_call_guest,port_fault,port_frames};
     port=mh_port_create(&mh_recomp_region,&host,argv[2],FRAMES);if(!port)return 75;
     if(getenv("MH_CALLLOG"))calllog=fopen(getenv("MH_CALLLOG"),"w");
+    if(getenv("MH_RENDER")){   /* reference software renderer: frames as PNG and a log of every draw */
+        static char pattern[600],logpath[600];snprintf(pattern,sizeof pattern,"%s/frame%%03u.png",getenv("MH_RENDER"));snprintf(logpath,sizeof logpath,"%s/draws.txt",getenv("MH_RENDER"));
+        mh_sw_renderer *sw=mh_sw_renderer_create(&mh_recomp_region,fopen(logpath,"w"),pattern);mh_port_renderer pr;mh_sw_renderer_bind(sw,&pr);mh_port_set_renderer(port,&pr);
+    }
     trace_all=getenv("MH_TRACE_ALL")!=NULL;
     /* boot phase 2 */
     for(unsigned i=0;i<BOOT_RUNS;i++){

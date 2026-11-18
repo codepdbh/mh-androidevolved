@@ -53,6 +53,36 @@ void mh_port_call_api(mh_port *port, int api, uint32_t esp, uint32_t *eax, int *
 void mh_port_call_com(mh_port *port, uint32_t va, uint32_t esp, uint32_t *eax, int *has_eax, uint32_t *pop, const char **label);
 int mh_port_is_com(uint32_t va);
 
+/* ---- Rendering: the device notifies a renderer; the renderer reads the recorded state. ----
+ * Nothing here changes the port's behaviour (the comparison with x86 is unaffected). */
+enum { MH_DRAW_PRIMITIVE, MH_DRAW_INDEXED, MH_DRAW_PRIMITIVE_UP, MH_DRAW_INDEXED_UP };
+typedef struct {
+    int kind;            /* MH_DRAW_* */
+    uint32_t primitive;  /* D3DPRIMITIVETYPE */
+    uint32_t args[8];    /* the method's arguments after `this` and the primitive type */
+} mh_port_draw_call;
+typedef struct {
+    void *user;
+    void (*clear)(void *user, mh_port *port, uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z, uint32_t stencil);
+    void (*draw)(void *user, mh_port *port, const mh_port_draw_call *call);
+    void (*present)(void *user, mh_port *port, unsigned frame);
+} mh_port_renderer;
+void mh_port_set_renderer(mh_port *port, const mh_port_renderer *renderer);
+typedef struct {
+    uint32_t format, width, height, levels;
+    uint32_t memory[16], pitch[16], level_width[16], level_height[16], version[16];
+} mh_port_texture_info;
+/* State of the (single) Direct3D device; each returns 0 when there is no device / nothing bound. */
+int mh_port_device_size(mh_port *port, uint32_t *width, uint32_t *height);
+uint32_t mh_port_render_state(mh_port *port, uint32_t state);            /* with DirectX 8 defaults */
+uint32_t mh_port_stage_state(mh_port *port, uint32_t stage, uint32_t type);
+int mh_port_transform(mh_port *port, uint32_t index, float m[16]);      /* identity when never set */
+void mh_port_viewport(mh_port *port, uint32_t v[6]);                     /* X, Y, Width, Height, MinZ, MaxZ (floats as bits) */
+uint32_t mh_port_fvf(mh_port *port);
+int mh_port_texture(mh_port *port, uint32_t stage, mh_port_texture_info *info);
+int mh_port_stream(mh_port *port, uint32_t stream, uint32_t *memory, uint32_t *length, uint32_t *stride);
+int mh_port_indices(mh_port *port, uint32_t *memory, uint32_t *length, uint32_t *format, uint32_t *base_vertex);
+
 /* Counters for the comparison with the reference. */
 uint64_t mh_port_clock(const mh_port *port);
 uint64_t mh_port_rdtsc(mh_port *port);   /* the guest's time-stamp counter */
