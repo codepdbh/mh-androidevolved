@@ -1558,31 +1558,49 @@ def run_loader_on_s25():
     return {'model':models[0] if len(models)==1 else None,'binary_sha256':digest,'cleanup':cleanup,'passed':passed,
             'comparison':Path(compared['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip()}
 
-def _run_binary_on_s25(binary,label,args=''):
+def _run_binary_on_s25(binary,label,args='',max_size=4*1024*1024,timeout=180):
     """Upload one private ARM64 test binary to a fresh random directory on one S25, run it
     once with `"$d"` substituted in args, and remove exactly that file and directory.
     Returns the program's stdout (LF). Raises on failure or unconfirmed cleanup."""
     import base64,hashlib,re,secrets,textwrap
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
-    if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or args not in ('','"$d"','/sdcard/mh-androidevolved/manhunt.exe'):raise WorkSafeError('invalid device run parameters')
+    if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or args not in ('','"$d"','/sdcard/mh-androidevolved/manhunt.exe','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved') or max_size>32*1024*1024:raise WorkSafeError('invalid device run parameters')
     adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
     if not adb.is_file():raise WorkSafeError('adb missing')
-    if binary[:4]!=b'\x7fELF' or int.from_bytes(binary[18:20],'little')!=183 or len(binary)>4*1024*1024:raise WorkSafeError('not a bounded ARM64 ELF')
+    if binary[:4]!=b'\x7fELF' or int.from_bytes(binary[18:20],'little')!=183 or len(binary)>max_size:raise WorkSafeError('not a bounded ARM64 ELF')
     digest=hashlib.sha256(binary).hexdigest()
     listing=_run_job([str(adb),'devices','-l'],15,f'device-{label}-list',cfg,max_processes=4,memory_mb=256)
     text=Path(listing['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')
     ready=[p[0] for line in text.splitlines()[1:] if len(p:=line.split())>=2 and p[1]=='device']
     if len(ready)!=1 or not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}',ready[0]):raise WorkSafeError('need exactly one authorized ADB device')
     remote='/data/local/tmp/mhae_'+secrets.token_hex(8)
-    encoded='\n'.join(textwrap.wrap(base64.b64encode(binary).decode('ascii'),76))
+    # Small binaries travel inside the shell script (base64); large ones (over the bounded stdin) are
+    # pushed with `adb push` into the fresh directory first. Either way the script checks the SHA-256,
+    # runs the binary once and removes exactly that file and directory.
+    pushed=len(binary)>1024*1024
+    if pushed:
+        local=ROOT/f'logs/device-{label}.bin';local.write_bytes(binary)
+        try:
+            made=_run_job([str(adb),'-s',ready[0],'shell','mkdir',remote],30,f'device-{label}-mkdir',cfg,max_processes=4,memory_mb=256)
+            if made['returncode']!=0 or made['timed_out']:raise WorkSafeError(f'{label}: cannot create the remote directory')
+            push=_run_job([str(adb),'-s',ready[0],'push',str(local),remote+'/test'],600,f'device-{label}-push',cfg,max_processes=4,memory_mb=512)
+        finally:
+            local.unlink(missing_ok=True)
+        if push['returncode']!=0 or push['timed_out']:
+            _run_job([str(adb),'-s',ready[0],'shell',f'rm -f {remote}/test; rmdir {remote}'],30,f'device-{label}-cleanup',cfg,max_processes=4,memory_mb=256)
+            raise WorkSafeError(f'{label}: adb push failed')
+        payload='[ -d "$d" ] && [ -f "$p" ] || exit 82\n'
+    else:
+        encoded='\n'.join(textwrap.wrap(base64.b64encode(binary).decode('ascii'),76))
+        payload='mkdir "$d" || exit 82\n'
     script=('case "$(getprop ro.product.model)" in SM-S931*|SM-S936*|SM-S937*|SM-S938*|SM-S731*) ;; *) exit 80;; esac\n'
         'case ",$(getprop ro.product.cpu.abilist)," in *,arm64-v8a,*) ;; *) exit 81;; esac\n'
         f'd={remote}\np="$d/test"\n'
-        'mkdir "$d" || exit 82\n'
+        +payload+
         'cleanup() { rm -f "$p" && rmdir "$d"; }\n'
         'finish() { rc=$?; trap - EXIT; if cleanup; then echo MHAE_CLEANUP_OK; else echo MHAE_CLEANUP_FAILED >&2; [ "$rc" -eq 0 ] && rc=91; fi; exit "$rc"; }\n'
         'trap finish EXIT\ntrap "exit 93" HUP INT TERM\n'
-        "base64 -d > \"$p\" <<'MHAE_PAYLOAD' || exit 83\n"+encoded+'\nMHAE_PAYLOAD\n'
+        +('' if pushed else "base64 -d > \"$p\" <<'MHAE_PAYLOAD' || exit 83\n"+encoded+'\nMHAE_PAYLOAD\n')+
         'set -- $(sha256sum "$p")\n'
         f'[ "${{1:-}}" = "{digest}" ] || exit 84\n'
         'chmod 700 "$p" || exit 85\n'
@@ -1591,7 +1609,7 @@ def _run_binary_on_s25(binary,label,args=''):
         'echo MHAE_TESTS_PASSED\nexit 0\n').encode('ascii')
     attempt=ROOT/f'logs/device-{label}-attempt.json'
     attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':'unconfirmed'},indent=2)+'\n',encoding='utf-8')
-    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],180,f'device-{label}-session',cfg,max_processes=4,memory_mb=512,input_bytes=script)
+    result=_run_job([str(adb),'-s',ready[0],'shell','-T','sh'],timeout,f'device-{label}-session',cfg,max_processes=4,memory_mb=512,input_bytes=script)
     output=Path(result['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').replace('\r\n','\n')
     cleanup='confirmed' if 'MHAE_CLEANUP_OK' in output else 'unconfirmed'
     attempt.write_text(json.dumps({'remote_directory':remote,'cleanup':cleanup},indent=2)+'\n',encoding='utf-8')
@@ -1666,7 +1684,7 @@ def _validate_unit_harness(name,source,runtime_sources=(),on_device=True,game_ar
         ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
         out=base/'android';out.mkdir(exist_ok=True);binary=out/f'{name}_test'
         arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',
-                      *[x for d in includes for x in ('-I',d)],str(ROOT/source),'-o',str(binary)],180,f'{name}-arm64-build',cfg,max_processes=4,memory_mb=768)
+                      *[x for d in includes for x in ('-I',d)],str(ROOT/source),'-o',str(binary),'-lm'],180,f'{name}-arm64-build',cfg,max_processes=4,memory_mb=768)
         if arm['returncode']!=0 or arm['timed_out']:raise WorkSafeError(f'{name} ARM64 build failed')
         output=_run_binary_on_s25(binary.read_bytes(),name.replace('_','-'),'/sdcard/mh-androidevolved/manhunt.exe' if game_arg else '')
         jsonl=ROOT/f'logs/{name}-arm64.jsonl';jsonl.write_text(output,encoding='utf-8')
@@ -1682,6 +1700,45 @@ def test_static_init(on_device=True):
 def test_boot_phase2(on_device=True):
     """Boot phase 2: CRT start-up and all 98 static initialisers translated, past the protection, on Windows x64 and the S25."""
     return _validate_unit_harness('boot_phase2','tests/boot_phase2_native.c',on_device=on_device,game_arg=True)
+
+def test_winmain(on_device=True,calllog=False):
+    """The boot up to WinMain's first frames, translated, over runtime/port_api.c, on Windows x64 and the S25,
+    compared with private/analysis/winmain/x86_reference.json (with calllog, the host also writes every call)."""
+    import hashlib,sys
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    base=ROOT/'private/analysis/winmain';report=json.loads((base/'winmain_report.json').read_text(encoding='utf-8'))
+    if hashlib.sha256((base/'winmain_unit.c').read_bytes()).hexdigest()!=report['unit_sha256']:raise WorkSafeError('winmain unit changed since lift')
+    reference=base/'x86_reference.json'
+    if json.loads(reference.read_text(encoding='utf-8')).get('unit_sha256')!=report['unit_sha256']:raise WorkSafeError('winmain x86 reference is stale')
+    includes=[str(ROOT/'private/pcrecomp/runtime/recomp32'),str(ROOT/'recomp'),str(ROOT/'runtime'),str(base)]
+    cl,env=_msvc_env();exe=base/'winmain-test.exe'
+    built=_run_job([str(cl),'/nologo','/Od','/std:c11',*[x for d in includes for x in ('/I',d)],'/Fo'+str(base)+'\\','/Fe'+str(exe),
+                    str(ROOT/'tests/winmain_native.c'),'/link','/INCREMENTAL:NO'],1800,'winmain-host-build',cfg,max_processes=4,memory_mb=4096,env=env)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('winmain host build failed; inspect winmain-host-build logs')
+    game=ROOT/'Manhunt Collection'/'Manhunt'
+    run_env=dict(os.environ)
+    if calllog:run_env['MH_CALLLOG']=str(ROOT/'logs/winmain-calls-windows-x64.txt')
+    ran=_run_job([str(exe),str(game/'manhunt.exe'),str(game)],900,'winmain-host-run',cfg,max_processes=1,memory_mb=2048,env=run_env)
+    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError(f'winmain host run failed with code {ran["returncode"]}')
+    def compare(path,platform):
+        r=_run_job([sys.executable,str(ROOT/'tests/compare_harness.py'),str(reference),str(path),platform],120,f'winmain-{platform}-compare',cfg,max_processes=1,memory_mb=768)
+        text=(Path(r['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')+Path(r['log']+'.stderr.log').read_text(encoding='utf-8',errors='replace')).strip()
+        if r['returncode']!=0 or r['timed_out']:raise WorkSafeError(f'winmain differs on {platform}: {text[-300:]}')
+        return text
+    results={'windows-x64':compare(ran['log']+'.stdout.log','windows-x64')}
+    if on_device:
+        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+        out=base/'android';out.mkdir(exist_ok=True);binary=out/'winmain_test'
+        arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIE','-pie',
+                      *[x for d in includes for x in ('-I',d)],str(ROOT/'tests/winmain_native.c'),'-o',str(binary),'-lm'],1800,'winmain-arm64-build',cfg,max_processes=4,memory_mb=6144)
+        if arm['returncode']!=0 or arm['timed_out']:raise WorkSafeError('winmain ARM64 build failed')
+        output=_run_binary_on_s25(binary.read_bytes(),'winmain','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved',max_size=32*1024*1024,timeout=900)
+        jsonl=ROOT/'logs/winmain-arm64.jsonl';jsonl.write_text(output,encoding='utf-8')
+        results['android-arm64']=compare(jsonl,'android-arm64')
+        (out/'validated.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
+            'output_sha256':hashlib.sha256(output.encode('utf-8')).hexdigest(),'compared_against':'private/analysis/winmain/x86_reference.json'},indent=2)+'\n',encoding='utf-8')
+    return results
 
 def test_graphics_d3d8(on_device=True):
     """The game's refresh-rate selector over the port's Direct3D 8 shim, on Windows x64 and the S25."""

@@ -37,8 +37,11 @@ STOS=re.compile(r'\{ uint32_t _n = ecx, _b = _n \* ([124])u; /\* (0x[0-9A-F]{8}:
                 r'if \(_df > 0\) \{ (?:memset|MEMSET16|MEMSET32)\(\(void\*\)ADDR\(edi\), (?:LO8\(eax\)|LO16\(eax\)|eax), _n\); edi \+= _b; \} '
                 r'else \{ (?:memset|MEMSET16|MEMSET32)\(\(void\*\)ADDR\(edi - _b \+ \1u\), (?:LO8\(eax\)|LO16\(eax\)|eax), _n\); edi -= _b; \} ecx = 0; \}')
 
+# Host functions translated code may call (besides sub_*, pure recomp_* helpers and, in x87 mode,
+# mh_x87_* and the x87 stack helpers): audited memory/dispatch helpers and the port's counters.
+HOST_CALLS={'mh_recomp_rep_stos','mh_recomp_rep_movs','mh_recomp_access','mh_dispatch_fault','abort','mh_x86_daa','mh_guest_rdtsc','mh_x87_bld'}
 X87_HELPERS={'fp_push','fp_pop','fp_push_i64','fp_round_cw','fp_xch','fabs'}
-X87_OPS={'+':'mh_x87_add','-':'mh_x87_sub','*':'mh_x87_mul','/':'mh_x87_div'}
+X87_OPS={'+':'mh_x87_add_pc','-':'mh_x87_sub_pc','*':'mh_x87_mul_pc','/':'mh_x87_div_pc'}   # rounded to the control word's precision
 X87_LIBM=re.compile(r'\b(sqrt|fabs|floor|ceil|trunc|nearbyint|rint|round|fmod|pow|ldexp|frexp|log\w*|exp\w*|sin|cos|tan|atan\w*|fp_\w+)\s*\(')
 X87_ARITH_LEFT=re.compile(r'_st\[\d\]\s*[-+*/]=|[-+*/]\s*(?:\(double\)\s*)?_st\[|_st\[\d\]\s*[-+*/](?!=)|\b_v\s*[-+*/]|[-+*/]\s*_v\b')
 def _x87_rewrite(source,address):
@@ -69,23 +72,23 @@ def _x87_rewrite(source,address):
         count(label,source.count(old));source=source.replace(old,new)
     # fdivp/fdivrp: PCRecomp guards a zero divisor by keeping the operand; x87 (exceptions masked)
     # gives a signed infinity, or the indefinite for 0/0 -- IEEE division through the helper.
-    source,n=re.subn(r'\{ double _v = fp_pop\(\); (_st\[\d\]) = _v == 0\.0 \? \1 : \1 / _v; \}',r'{ double _v = fp_pop(); \1 = mh_x87_div(\1, _v); }',source);count('fdivp',n)
-    source,n=re.subn(r'\{ double _v = fp_pop\(\); (_st\[\d\]) = \1 == 0\.0 \? _v : _v / \1; \}',r'{ double _v = fp_pop(); \1 = mh_x87_div(_v, \1); }',source);count('fdivrp',n)
+    source,n=re.subn(r'\{ double _v = fp_pop\(\); (_st\[\d\]) = _v == 0\.0 \? \1 : \1 / _v; \}',r'{ double _v = fp_pop(); \1 = mh_x87_div_pc(\1, _v, _fpu_cw); }',source);count('fdivp',n)
+    source,n=re.subn(r'\{ double _v = fp_pop\(\); (_st\[\d\]) = \1 == 0\.0 \? _v : _v / \1; \}',r'{ double _v = fp_pop(); \1 = mh_x87_div_pc(_v, \1, _fpu_cw); }',source);count('fdivrp',n)
     # fist/fistp word and dword: integer indefinite instead of C's undefined conversion
     source,n=re.subn(r'\(uint32_t\)\(int32_t\)fp_to_int\(([^;]*?)\);',r'(uint32_t)mh_x87_to_i32(\1, _fpu_cw);',source);count('fist dword',n)
     source,n=re.subn(r'\(int16_t\)fp_to_int\(([^;]*?)\);',r'(uint16_t)mh_x87_to_i16(\1, _fpu_cw);',source);count('fist word',n)
     # st(i) op= rhs  ->  st(i) = helper(st(i), rhs)
-    source,n=re.subn(r'_st\[(\d)\] ([-+*/])= ([^;]+);',lambda m:f'_st[{m.group(1)}] = {X87_OPS[m.group(2)]}(_st[{m.group(1)}], {m.group(3)});',source)
+    source,n=re.subn(r'_st\[(\d)\] ([-+*/])= ([^;]+);',lambda m:f'_st[{m.group(1)}] = {X87_OPS[m.group(2)]}(_st[{m.group(1)}], {m.group(3)}, _fpu_cw);',source)
     count('x87 arithmetic',n)
     # integer-operand forms (fimul/fiadd/fisub/fidiv): st(i) = st(i) op rhs
-    source,n=re.subn(r'_st\[(\d)\] = _st\[\1\] ([-+*/]) ([^;]+);',lambda m:f'_st[{m.group(1)}] = {X87_OPS[m.group(2)]}(_st[{m.group(1)}], {m.group(3)});',source)
+    source,n=re.subn(r'_st\[(\d)\] = _st\[\1\] ([-+*/]) ([^;]+);',lambda m:f'_st[{m.group(1)}] = {X87_OPS[m.group(2)]}(_st[{m.group(1)}], {m.group(3)}, _fpu_cw);',source)
     count('x87 integer-operand arithmetic',n)
     # reverse forms (fsubr/fdivr): st(i) = rhs op st(i)
     def reverse(m):
         if m.group(1)!=m.group(4):raise SystemExit(f'unexpected reverse x87 form at {address:#x}')
-        return f'_st[{m.group(1)}] = {X87_OPS[m.group(3)]}({m.group(2)}, _st[{m.group(4)}]);'
+        return f'_st[{m.group(1)}] = {X87_OPS[m.group(3)]}({m.group(2)}, _st[{m.group(4)}], _fpu_cw);'
     source,n=re.subn(r'_st\[(\d)\] = ([^;=]+?) ([-/]) _st\[(\d)\];',reverse,source);count('x87 reverse arithmetic',n)
-    source,n=re.subn(r'\bsqrt\(_st\[0\]\)','mh_x87_sqrt(_st[0])',source);count('fsqrt',n)
+    source,n=re.subn(r'\bsqrt\(_st\[0\]\)','mh_x87_sqrt_pc(_st[0], _fpu_cw)',source);count('fsqrt',n)
     source,n=re.subn(r'\bfp_st0_to_i64\(','mh_x87_st0_to_i64(',source);count('fistp qword',n)
     code=re.sub(r'/\*.*?\*/','',source,flags=re.DOTALL)
     if X87_ARITH_LEFT.search(code):raise SystemExit(f'x87 arithmetic left without helper at {address:#x}')
@@ -268,8 +271,34 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
         source=re.sub(r'RECOMP_ITAIL\(([^;]*?)\); return; /\* 0x([0-9A-F]{8}): jmp [^*]*\*/',indirect_jump,source)
         source=re.sub(r'RECOMP_ICALL\(([^;]*?)\); /\* 0x([0-9A-F]{8}): call [^*]*\*/',dynamic,source)
         source=STOS.sub(stos,source)
+        # Instructions PCRecomp leaves as an empty statement (`; /* UNIMPLEMENTED: ... */`), with
+        # their bytes checked; anything else still unimplemented aborts below.
+        def unimplemented(m):
+            mnem,ops,site=m.group(1),m.group(2).strip(),int(m.group(3),16)
+            raw=pe.get_data(site-base,4)
+            if mnem=='daa' and raw[0]==0x27:
+                rewrites.append('daa')
+                return (f'{{ uint32_t _e = mh_x86_daa(&eax, recomp_eflags(_flag_k, _flag_a, _flag_b, _cf, _df)); '
+                        f'_flag_k = FK_EFLAGS; _flag_a = _e; _flag_b = 0; _cf = _e & 1u; }} /* 0x{site:08X}: daa */')
+            if mnem=='pushf' and raw[:2]==b'\x66\x9c':   # 16-bit: pushes FLAGS (2 bytes)
+                rewrites.append('pushf16')
+                return f'esp = esp - 2u; MEM16(esp) = (uint16_t)recomp_eflags(_flag_k, _flag_a, _flag_b, _cf, _df); /* 0x{site:08X}: pushf */'
+            if mnem=='popf' and raw[:2]==b'\x66\x9d':    # 16-bit: replaces the low half of EFLAGS
+                rewrites.append('popf16')
+                return (f'{{ uint32_t _fl = (recomp_eflags(_flag_k, _flag_a, _flag_b, _cf, _df) & 0xFFFF0000u) | MEM16(esp); esp = esp + 2u; '
+                        f'_flag_k = FK_EFLAGS; _flag_a = _fl; _flag_b = 0; _cf = _fl & 1u; _df = (_fl & 0x400u) ? -1 : 1; }} /* 0x{site:08X}: popf */')
+            mem=re.fullmatch(r'tbyte ptr \[([a-z0-9 +*x-]+)\]',ops)
+            if mnem=='fbld' and mem and raw[0]==0xdf and (raw[1]>>3)&7==4:
+                rewrites.append('fbld')
+                return f'fp_push(mh_x87_bld((const uint8_t*)mh_recomp_access((uint32_t)({mem.group(1)}), 10))); /* 0x{site:08X}: fbld {ops} */'
+            return m.group(0)
+        source=re.sub(r'; /\* UNIMPLEMENTED: (\w+) ([^*]*?)\*/ /\* 0x([0-9A-F]{8}): [^*]*\*/',unimplemented,source)
+        if 'UNIMPLEMENTED' in source:raise SystemExit(f'unimplemented instruction at {address:#x}: '+re.search(r'UNIMPLEMENTED: [^*]*',source).group(0))
         source,n=re.subn(r'\brecomp_rep_movs\(','mh_recomp_rep_movs(',source)
         if n:rewrites.append(f'{n} rep movs')
+        # rdtsc: the guest's time-stamp counter comes from the port (deterministic), never the host's.
+        n=source.count('uint64_t _t = __rdtsc();')
+        if n:source=source.replace('uint64_t _t = __rdtsc();','uint64_t _t = mh_guest_rdtsc();');rewrites.append(f'{n} rdtsc -> port counter')
         n=source.count(CPUID)
         if n:source=source.replace(CPUID,'MH_VIRTUAL_CPUID();');rewrites.append(f'{n} cpuid -> virtual CPU')
         # Switches: the bounded table only holds this function's arms, so a value that is not one
@@ -287,6 +316,13 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
         if macros:raise SystemExit(f'macros outside the audited list at {address:#x}: '+','.join(sorted(macros)))
         helpers=set(re.findall(r'\b(recomp_\w+)\s*\(',code_only))
         if not helpers.issubset(PURE_HELPERS):raise SystemExit(f'unchecked runtime helpers at {address:#x}: '+','.join(sorted(helpers-PURE_HELPERS)))
+        # Every other function the translated code calls must be on a closed list: translated
+        # functions, audited port/x87 helpers and fault handlers (a host call such as __rdtsc
+        # would make the result depend on the machine).
+        calls=set(re.findall(r'\b([A-Za-z_]\w*)\s*\(',code_only))-MACROS-{'if','while','for','switch','return','sizeof'}
+        host=sorted(c for c in calls if not (re.fullmatch(r'sub_[0-9A-F]{8}',c) or c in HOST_CALLS or c in PURE_HELPERS
+                    or c in ALLOWED or c in {'RECOMP_PF','MEMF','MEMD','MEM64','FPU_CMP'} or (x87 and (c.startswith('mh_x87_') or c in X87_HELPERS))))
+        if host:raise SystemExit(f'host functions called at {address:#x}: '+','.join(host))
         operations=set(re.findall(r'\b(?:MEM\w+|ADDR|RECOMP_\w+|PUSH\w+|POP\w+)\s*(?=\()',code_only))
         allowed=ALLOWED|{'RECOMP_PF'}|({'MEMF','MEMD','MEM64'} if x87 else set())
         if not operations.issubset(allowed):raise SystemExit(f'unsupported operations at {address:#x}: '+','.join(sorted(operations-allowed)))

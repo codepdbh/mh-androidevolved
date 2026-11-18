@@ -32,8 +32,23 @@ static inline double mh_x87_add(double a, double b) { return mh_x87_result(a + b
 static inline double mh_x87_sub(double a, double b) { return mh_x87_result(a - b, a, b); }
 static inline double mh_x87_mul(double a, double b) { return mh_x87_result(a * b, a, b); }
 static inline double mh_x87_div(double a, double b) { return mh_x87_result(a / b, a, b); }
+/* Precision control (control word bits 8-9) for FADD/FSUB/FMUL/FDIV/FSQRT and their integer and
+ * popping forms: 00 rounds the significand to 24 bits (keeping x87's wide exponent range, unlike a
+ * float conversion), 10 to 53 bits (double, the model's own precision), 11 is extended (modelled
+ * as double). Rounding is to nearest even, the x87 default (RC 00). Transcendental instructions
+ * are not affected by precision control. */
+static inline double mh_x87_round_pc(double r, uint16_t cw) {
+    if (((cw >> 8) & 3) != 0 || r == 0.0 || r != r || isinf(r)) return r;
+    int e; double m = frexp(r, &e);                 /* r = m * 2^e, 0.5 <= |m| < 1 */
+    return ldexp(nearbyint(ldexp(m, 24)), e - 24);
+}
+static inline double mh_x87_add_pc(double a, double b, uint16_t cw) { return mh_x87_round_pc(mh_x87_add(a, b), cw); }
+static inline double mh_x87_sub_pc(double a, double b, uint16_t cw) { return mh_x87_round_pc(mh_x87_sub(a, b), cw); }
+static inline double mh_x87_mul_pc(double a, double b, uint16_t cw) { return mh_x87_round_pc(mh_x87_mul(a, b), cw); }
+static inline double mh_x87_div_pc(double a, double b, uint16_t cw) { return mh_x87_round_pc(mh_x87_div(a, b), cw); }
 /* fsqrt: a negative operand (not -0) is invalid and yields the indefinite. */
 static inline double mh_x87_sqrt(double a) { return a < 0.0 ? mh_x87_indefinite() : sqrt(a); }
+static inline double mh_x87_sqrt_pc(double a, uint16_t cw) { return mh_x87_round_pc(mh_x87_sqrt(a), cw); }
 /* fistp qword: round by the control word's RC field (bits 10-11). NaN, infinities
  * and results outside int64 give the x87 "integer indefinite" 0x8000000000000000
  * (C's conversion would be undefined behaviour). */

@@ -50,7 +50,7 @@ def executed_closure(data,roots,executed=None,skip=()):
             if not ins&executed:stopped.add(a);continue
             kept[a]=ins;pending.extend(sorted(f.calls_to))
         covered=set().union(*kept.values())
-        uncovered=sorted(b for b in executed if 0x401000<=b<0x66e200 and b not in covered and b not in skip)
+        uncovered=sorted(b for b in executed if (0x401000<=b<0x66e200 or 0x66f000<=b<0x66f451) and b not in covered and b not in skip)
         if not uncovered:break
         f,ins=instructions(uncovered[0])
         if not f or uncovered[0] not in ins:raise SystemExit(f'executed code at {uncovered[0]:#x} is not a function entry')

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "x87_semantics.h"
+#include "x86_semantics.h"
 
 static uint64_t bits64(double v) { uint64_t b; memcpy(&b, &v, sizeof b); return b; }
 static uint32_t bits32(float v) { uint32_t b; memcpy(&b, &v, sizeof b); return b; }
@@ -65,6 +66,25 @@ int mh_x87_semantic_checks(void) {
     CHECK(mh_x87_f2xm1(1.0) == 1.0 && mh_x87_f2xm1(0.0) == 0.0 && mh_x87_f2xm1(-1.0) == -0.5);
     CHECK(mh_x87_scale(3.0, 2.9) == 12.0 && mh_x87_scale(3.0, -1.5) == 1.5 && mh_x87_scale(1.0, 1e9) == INFINITY && mh_x87_scale(1.0, -1e9) == 0.0);
     CHECK(mh_x87_scale(2.0, inf) == INFINITY && bits64(mh_x87_scale(zero, inf)) == 0xFFF8000000000000ull);
+    /* daa (QEMU's algorithm) and fbld */
+    {
+        uint32_t r = 0x1234560f, e = mh_x86_daa(&r, 0x202);
+        CHECK(r == 0x12345615 && (e & 0x10) && !(e & 1) && (e & 0x202) == 0x202);
+        r = 0x9a; e = mh_x86_daa(&r, 0x202); CHECK(r == 0x00 && (e & 1) && (e & 0x10) && (e & 0x40) && (e & 4));
+        r = 0x45; e = mh_x86_daa(&r, 0x8c2); CHECK(r == 0x45 && (e & 0x8d5) == 0);   /* no CF/AF in: no adjustment; 0x45 has odd parity, so PF, OF, CF, AF, ZF, SF all clear */
+        r = 0x45; e = mh_x86_daa(&r, 0x011); CHECK(r == 0xab && (e & 1) && (e & 0x10) && (e & 0x80));
+        const uint8_t bcd[10] = {0x34, 0x12, 0, 0, 0, 0, 0x99, 0, 0, 0x80};   /* -99000000001234: exact in a double */
+        CHECK(mh_x87_bld(bcd) == -99000000001234.0);
+        const uint8_t zero_bcd[10] = {0};
+        CHECK(mh_x87_bld(zero_bcd) == 0.0);
+    }
+    /* precision control */
+    CHECK(mh_x87_div_pc(1.0, 3.0, 0x027f) == 1.0 / 3.0);                                    /* 53 bits: double */
+    CHECK(mh_x87_div_pc(1.0, 3.0, 0x007f) == (double)(1.0f / 3.0f));                        /* 24 bits */
+    CHECK(mh_x87_mul_pc(3.0f * 1.0, 0.017453292f, 0x007f) == (double)(3.0f * 0.017453292f));
+    CHECK(mh_x87_mul_pc(1e30, 1e30, 0x007f) > 1e59 && !isinf(mh_x87_mul_pc(1e30, 1e30, 0x007f)));   /* wide exponent kept */
+    CHECK(bits64(mh_x87_div_pc(zero, zero, 0x007f)) == 0xFFF8000000000000ull && mh_x87_add_pc(inf, 1.0, 0x007f) == inf);
+    CHECK(mh_x87_sqrt_pc(2.0, 0x007f) == (double)sqrtf(2.0f) && mh_x87_sub_pc(1.0, 1e-9, 0x007f) == (double)(1.0f - 1e-9f));
     /* 80-bit load/store */
     {
         uint8_t t[10];

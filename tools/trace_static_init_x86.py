@@ -11,7 +11,7 @@ defined; any other API stops the trace and reports its name and arguments.
 Records executed basic blocks, indirect-call targets and API calls.
 Output: private/analysis/static_init/trace.json. Nothing is executed natively.
 """
-import hashlib,json,struct,sys,zlib
+import hashlib,json,os,struct,sys,zlib
 from collections import Counter
 import pefile
 from unicorn import Uc,UcError,UC_ARCH_X86,UC_MODE_32,UC_HOOK_INSN,UC_HOOK_MEM_INVALID,UC_HOOK_CODE,UC_HOOK_BLOCK
@@ -66,10 +66,17 @@ def main():
     ARGS={'InitializeCriticalSection':1,'EnterCriticalSection':1,'LeaveCriticalSection':1,'DeleteCriticalSection':1,'GlobalAlloc':2,'GlobalFree':1,
           'TlsGetValue':1,'TlsSetValue':2,'TlsAlloc':0,'TlsFree':1,'GetStdHandle':1,'GetCurrentProcess':0,'DuplicateHandle':7,'GetCommandLineA':0,'GetEnvironmentStrings':0,'FreeEnvironmentStringsA':1,'CreateEventA':4,'GetTickCount':0}
     extra={}   # filled for the WinMain stage (tools/winmain_apis.py)
+    calllog=None   # WinMain stage: every API/COM call in order (name, return address)
+    dump_at=int(os.environ.get('MH_DUMP_AT','0'))
+    def logcall(text):   # MH_DUMP_AT=n: write .data/.bss at the n-th call and stop (bisecting a divergence)
+        calllog.append(text)
+        if dump_at and len(calllog)==dump_at:
+            open(os.environ['MH_DUMP'],'wb').write(bytes(cpu.mem_read(0x67d000,0x8296d4-0x67d000)));raise SystemExit('dumped at call %d'%dump_at)
     def api(uc,address,size,user):
         if address not in fake:return
         name,dll,slot=fake[address];esp=cpu.reg_read(UC_X86_REG_ESP);ret=r32(esp)
         args=[r32(esp+4+4*i) for i in range(12)];state['counts'][name]+=1
+        if calllog is not None:logcall(f'{name} {ret:x}')
         result=None
         if name in ('EnterCriticalSection','LeaveCriticalSection'):
             cs=args[0];lock,rec,owner=r32(cs+4),r32(cs+8),r32(cs+12)
@@ -146,6 +153,7 @@ def main():
         esp=cpu.reg_read(UC_X86_REG_ESP);ret=r32(esp)
         nargs,result,label=extra['com'][1](address,lambda i:r32(esp+4+4*i))
         state['counts'][label]+=1;pop=esp+4+4*nargs
+        if calllog is not None:logcall(f'{label} {ret:x}')
         if isinstance(result,Callbacks):
             pending.append({'calls':list(result.calls),'finish':result.finish,'results':[],'esp':esp,'pop':pop,'ret':ret});next_callback();return
         if result is not None:cpu.reg_write(UC_X86_REG_EAX,result)
@@ -156,9 +164,21 @@ def main():
         table=extra.get('replaced',(0,{}))[1]
         if address not in table:return
         esp=cpu.reg_read(UC_X86_REG_ESP);name,fn=table[address];state['counts'][name]+=1
+        if calllog is not None:logcall(f'{name} {r32(esp):x}')
         cpu.reg_write(UC_X86_REG_EAX,fn());cpu.reg_write(UC_X86_REG_ESP,esp+4);cpu.reg_write(UC_X86_REG_EIP,r32(esp))
     cpu.hook_add(UC_HOOK_CODE,api,begin=API_BASE,end=API_BASE+0x10*(len(imports)+2))
     cpu.hook_add(UC_HOOK_INSN,virtual_cpuid,None,1,0,UC_X86_INS_CPUID)
+    # rdtsc: the port's deterministic counter (runtime/port_api.c mh_port_rdtsc): virtual clock x 1e6 + reads.
+    # (Unicorn's Python binding has no instruction hook for rdtsc: a code hook on every 0F 31 in
+    # the code sections sets edx:eax and skips the two bytes; at other offsets it never fires.)
+    tsc={'reads':0};RDTSC=bytes((0x0f,0x31))
+    def virtual_rdtsc(uc,address,size,user):
+        if bytes(uc.mem_read(address,2))!=RDTSC:return
+        tsc['reads']+=1;v=state.get('clock',0x10000)*1000000+tsc['reads']
+        uc.reg_write(UC_X86_REG_EAX,v&0xffffffff);uc.reg_write(UC_X86_REG_EDX,(v>>32)&0xffffffff);uc.reg_write(UC_X86_REG_EIP,address+2)
+    for lo,hi in ((0x401000,0x66e200),(0x66f000,0x66f451)):
+        code=bytes(cpu.mem_read(lo,hi-lo));at=code.find(RDTSC)
+        while at>=0:cpu.hook_add(UC_HOOK_CODE,virtual_rdtsc,begin=lo+at,end=lo+at);at=code.find(RDTSC,at+1)
     # Unicorn starts with FPCW=0 (24-bit precision, exceptions unmasked); a Windows process starts
     # with 0x027F (53-bit precision, all exceptions masked), which the port models.
     cpu.reg_write(UC_X86_REG_FPCW,0x027f)
@@ -166,8 +186,15 @@ def main():
     blocks=set();recent=deque(maxlen=12)
     def on_block(uc,address,size,user):   # one Python call per block: executed .text blocks and the last 12 blocks
         recent.append(address)
-        if 0x401000<=address<0x66e200:blocks.add(address)
+        if 0x401000<=address<0x66e200 or 0x66f000<=address<0x66f451:blocks.add(address)   # .text and _rwcseg (RenderWare x87 code)
     cpu.hook_add(UC_HOOK_BLOCK,on_block)
+    if os.environ.get('MH_WATCH'):   # debugging: report every write to one guest address (writer EIP, value, recent blocks)
+        from unicorn import UC_HOOK_MEM_WRITE
+        watch=int(os.environ['MH_WATCH'],16)
+        def watched(uc,access,address,size,value,user):
+            print('WRITE %#x size %d value %#x eip %#x calls %d recent %s'%(address,size,value&0xffffffff,uc.reg_read(UC_X86_REG_EIP),
+                  len(calllog) if calllog is not None else -1,' '.join(hex(b) for b in recent)),flush=True)
+        cpu.hook_add(UC_HOOK_MEM_WRITE,watched,begin=watch,end=watch+3)
     # The wrapper's own code is never executed (it is filled at run time). Calls through
     # its slot are replaced by what each call site needs, as in runtime/protection_redirect.c.
     def protected(uc,address,size,user):
@@ -230,7 +257,7 @@ def main():
     import winmain_apis
     extra.update(winmain_apis.make({'cpu':cpu,'r32':r32,'w32':w32,'cstr':cstr,'state':state,'Callbacks':Callbacks,'game_dir':str(GAME.parent),'frames':int(sys.argv[sys.argv.index('--frames')+1]) if '--frames' in sys.argv else 3}))
     for address in extra.get('replaced',(0,{}))[1]:cpu.hook_add(UC_HOOK_CODE,replaced,begin=address,end=address)
-    phase2_blocks=set(blocks);state['counts'].clear()
+    phase2_blocks=set(blocks);state['counts'].clear();calllog=[]
     for reg,value in ((UC_X86_REG_EAX,0x11111111),(UC_X86_REG_EBX,0x22222222),(UC_X86_REG_ECX,0x33333333),(UC_X86_REG_EDX,0x44444444),
                       (UC_X86_REG_ESI,0x55555555),(UC_X86_REG_EDI,0x66666666),(UC_X86_REG_EBP,0x77777777),(UC_X86_REG_ESP,STACK_TOP),(UC_X86_REG_EFLAGS,0x202)):
         cpu.reg_write(reg,value)
@@ -245,6 +272,27 @@ def main():
     out=ROOT/'private/analysis/winmain';out.mkdir(parents=True,exist_ok=True)
     (out/'trace.json').write_text(json.dumps({'input_sha256':EXPECTED,'error':werror,'returned':werror is None and reached is None,'frames_reached':reached,'eax':cpu.reg_read(UC_X86_REG_EAX),
         'api_counts':dict(state['counts']),'unsupported_calls':state['calls'],'executed_blocks':sorted(hex(b) for b in new_blocks)},indent=1)+'\n',encoding='utf-8')
+    (out/'calls.txt').write_text('\n'.join(calllog)+'\n',encoding='utf-8')
+    # Import table in this reference's fake-address order (tests/winmain_native.c assigns the same).
+    (out/'winmain_imports.h').write_text('/* Generated by tools/trace_static_init_x86.py; private. Import slots in fake-address order. */\n'
+        f'#define WINMAIN_IMPORTS {len(imports)}u\nstatic const struct {{ uint32_t slot; const char *name; }} winmain_imports[WINMAIN_IMPORTS]={{\n'
+        +''.join(f'    {{0x{slot:x}u,"{name}"}},\n' for slot,name,dll in imports)+'};\n',encoding='utf-8',newline='\n')
+    if reached:
+        read=lambda a,n:bytes(cpu.mem_read(a,n))
+        com=state['com'];res_next=state.get('res_next',0x10000000)
+        case={'calls':len(calllog),'api_counts':dict(sorted(state['counts'].items())),'clock':state['clock'],'frames':state.get('frames',0),
+              'last_error':state['last_error'],'global_next':state['next'],'com_next':com['next'],'res_next':res_next,
+              'data_crc':zlib.crc32(read(0x67d000,0x7ed4a0-0x67d000)),'bss_crc':zlib.crc32(read(0x81e000,0x8296d4-0x81e000)),
+              'image_crc':[zlib.crc32(read(0x400000,0x81b000-0x400000)),zlib.crc32(read(0x81c2a0,0xa16000-0x81c2a0))],
+              'stack_crc':zlib.crc32(read(STACK_TOP-0x10000,0x10014)),'global_crc':zlib.crc32(read(GLOBAL_BASE,state['next']-GLOBAL_BASE)),
+              'com_crc':zlib.crc32(read(0x1e40000,com['next']-0x1e40000)),'res_crc':zlib.crc32(read(0x10000000,res_next-0x10000000)),
+              'fpu_cw':cpu.reg_read(UC_X86_REG_FPCW)}
+        report=ROOT/'private/analysis/winmain/winmain_report.json'
+        unit=json.loads(report.read_text(encoding='utf-8'))['unit_sha256'] if report.exists() else None
+        if os.environ.get('MH_DUMP'):open(os.environ['MH_DUMP'],'wb').write(read(0x67d000,0x8296d4-0x67d000))
+        if os.environ.get('MH_DUMP_GLOBAL'):open(os.environ['MH_DUMP_GLOBAL'],'wb').write(read(GLOBAL_BASE,state['next']-GLOBAL_BASE))
+        (out/'x86_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'unit_sha256':unit,'cases':[case]},indent=1)+'\n',encoding='utf-8')
+        print('WinMain x86 reference written: res memory',hex(res_next-0x10000000),'COM heap',hex(com['next']-0x1e40000),'calls',len(calllog))
     print('WinMain:',len(new_blocks),'new blocks; APIs',dict(state['counts']))
     print('WinMain STOP:',werror) if werror else print('WinMain: stopped after',reached) if reached else print('WinMain returned',hex(cpu.reg_read(UC_X86_REG_EAX)))
 if __name__=='__main__':main()

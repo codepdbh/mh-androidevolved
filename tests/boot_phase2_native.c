@@ -14,6 +14,7 @@
 #include "checked_dispatch_adapter.h"
 #include "virtual_cpu.h"
 #include "x87_semantics.h"
+#include "x86_semantics.h"
 #include "../runtime/guest_memory.c"
 #include "../runtime/pe32_image.c"
 #include "../runtime/win32_memory.c"
