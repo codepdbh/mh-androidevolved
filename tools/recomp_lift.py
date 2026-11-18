@@ -113,7 +113,10 @@ def switch_bound(read,address):
         if i.mnemonic in('ja','jae'):
             # the flags come from the nearest cmp before it; flag-neutral moves in between must not write idx
             c=j-1
-            while c>0 and ins[c].mnemonic in('mov','lea','movzx','movsx','push','pop') and ins[c].op_str.split(',')[0].strip()!=idx:c-=1
+            # x87 loads/stores/arithmetic leave EFLAGS and the integer registers alone (not fcomi/fucomi, which set
+            # EFLAGS, nor fnstsw, which writes ax)
+            neutral=lambda m:m in('mov','lea','movzx','movsx','push','pop') or (m.startswith('f') and not m.startswith(('fcomi','fucomi','fnstsw','fstsw')))
+            while c>0 and neutral(ins[c].mnemonic) and ins[c].op_str.split(',')[0].strip()!=idx:c-=1
             if ins[c].mnemonic=='test' and i.mnemonic=='ja' and ins[c].op_str==f'{idx}, {idx}':return 1   # test leaves CF=0: ja exits unless idx==0
             if ins[c].mnemonic!='cmp':return None
             cmp=ins[c];reg,_,imm=cmp.op_str.partition(', ')

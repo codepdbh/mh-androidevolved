@@ -13,6 +13,10 @@ Port model (single guest process, no real Windows):
 GAME_DIR='C:\\Manhunt\\'
 MODULE_PATH=GAME_DIR+'manhunt.exe'
 IMAGE_BASE=0x400000
+import os as _os
+# Input script, shared with runtime/port_api.c: "key:from:to,..." (hex DIK scan code; the key is
+# down while from <= presented frames < to).
+KEY_SCRIPT=[(int(k,16),int(f),int(t)) for k,f,t in (x.split(':') for x in _os.environ.get('MH_KEYS','').split(',') if x)]
 def make(ctx):
     apis={};cpu,state=ctx['cpu'],ctx['state']
     def api(name,nargs):
@@ -44,7 +48,10 @@ def make(ctx):
 
     # Language: the port takes it from the Android locale / app setting; the reference uses
     # English (United States) so that it is deterministic.
-    LANGID=0x0409
+    # The user's language (MH_LANG, hex LANGID; as runtime/port_api.c). The game maps its primary
+    # language: French 0x040c, Italian 0x0410, Spanish 0x0c0a, German only outside Germany
+    # (0x0c07, 0x0807: German 0x0407 gets English), anything else English.
+    LANGID=int(_os.environ.get('MH_LANG','0409'),16)
     @api('GetUserDefaultLangID',0)
     def _(a):return LANGID
     @api('GetSystemDefaultLangID',0)
@@ -192,7 +199,23 @@ def make(ctx):
         if a[0]==0:return IMAGE_BASE
         name=ctx['cstr'](a[0]).lower().replace('/','\\').split('\\')[-1]
         if name in ('manhunt.exe','manhunt'):return IMAGE_BASE
+        if name in ('kernel32.dll','kernel32'):return KERNEL32
         unsupported(f'GetModuleHandleA({name!r})')
+    # kernel32 is a pseudo module: GetProcAddress resolves only functions the executable also
+    # imports (the result is that import's address); the game probes GetDiskFreeSpaceExA.
+    KERNEL32=0x7ff00000
+    PROC_SLOTS={'GetDiskFreeSpaceExA':0x81b3c8}
+    @api('GetProcAddress',2)
+    def _(a):
+        name=ctx['cstr'](a[1]) if a[1]>0xffff else None
+        if a[0]!=KERNEL32 or name not in PROC_SLOTS:unsupported(f'GetProcAddress({a[0]:#x}, {name!r})')
+        return ctx['r32'](PROC_SLOTS[name])
+    # Save space: 8 GiB free of 16 GiB, for any directory.
+    @api('GetDiskFreeSpaceExA',4)
+    def _(a):
+        for ptr,value in zip(a[1:4],(8<<30,16<<30,8<<30)):
+            if ptr:w32(ptr,value&0xffffffff);w32(ptr+4,value>>32)
+        return 1
 
     # ---- Files (read-only game data) --------------------------------------------------------
     # Guest paths under C:\Manhunt\ (absolute, or relative to the current directory) map onto
@@ -574,8 +597,12 @@ def make(ctx):
     apis['com']=(0,dispatch)
     def addref(o,a):
         refs=ctx['r32'](a[0]+4)+1;w32(a[0]+4,refs);return refs
+    release_hooks=[]
     def release(o,a):
-        refs=max(ctx['r32'](a[0]+4)-1,0);w32(a[0]+4,refs);return refs
+        refs=max(ctx['r32'](a[0]+4)-1,0);w32(a[0]+4,refs)
+        if refs==0:
+            for hook in release_hooks:hook(o)
+        return refs
     def unknown(rest):return [('QueryInterface',3,None),('AddRef',1,addref),('Release',1,release)]+rest
 
     # ---- DirectInput 8 -------------------------------------------------------------------
@@ -600,7 +627,16 @@ def make(ctx):
     def dev_get_device_state(o,a):
         if not o['data'].get('acquired'):return DIERR_NOTACQUIRED
         if a[1]!=o['data'].get('format'):return DIERR_INVALIDPARAM
-        cpu.mem_write(a[2],bytes(a[1]));return 0
+        data=bytearray(a[1])
+        if o['data']['kind']=='keyboard' and a[1]==256:   # input script MH_KEYS="1c:10:14,..." (as runtime/port_api.c)
+            frames=state.get('frames',0)
+            for k,f,t in KEY_SCRIPT:
+                if f<=frames<t:data[k]=0x80
+        if o['data']['kind']=='mouse' and a[1] in (16,20):   # buttons at +12: script codes 0x100+n
+            frames=state.get('frames',0)
+            for k,f,t in KEY_SCRIPT:
+                if 0x100<=k<0x100+a[1]-12 and f<=frames<t:data[12+k-0x100]=0x80
+        cpu.mem_write(a[2],bytes(data));return 0
     # Virtual devices: a 3-axis, 3-button traditional mouse and an enhanced 101/102-key keyboard,
     # attached, no POVs, no force feedback.
     def dev_get_capabilities(o,a):
@@ -777,10 +813,38 @@ def make(ctx):
     # bump allocation (released resources are not reused yet).
     RES_BASE,RES_LIMIT=0x10000000,0x20000000
     if not state.get('res_mapped'):cpu.mem_map(RES_BASE,RES_LIMIT-RES_BASE);state['res_mapped']=True;state['res_next']=RES_BASE
+    # Released resources return their memory (as runtime/port_api.c): sizes rounded to 16, first
+    # fit in address order over the free blocks, else the top; reused memory is zeroed.
+    state.setdefault('res_free',[])
     def res_alloc(size):
-        start=(state['res_next']+15)&~15
+        size=(size+15)&~15;free=state['res_free']
+        for i,(s,e) in enumerate(free):
+            if e-s>=size:
+                if e-s==size:free.pop(i)
+                else:free[i]=(s+size,e)
+                cpu.mem_write(s,bytes(size));return s
+        start=state['res_next']
         if start+size>RES_LIMIT:unsupported('Direct3D resource memory exhausted')
         state['res_next']=start+size;return start
+    def res_release(start,size):
+        size=(size+15)&~15;free=state['res_free'];i=0
+        while i<len(free) and free[i][0]<start:i+=1
+        free.insert(i,(start,start+size))
+        if i+1<len(free) and free[i][1]==free[i+1][0]:free[i]=(free[i][0],free[i+1][1]);free.pop(i+1)
+        if i>0 and free[i-1][1]==free[i][0]:free[i-1]=(free[i-1][0],free[i][1]);free.pop(i);i-=1
+        if free and free[-1][1]==state['res_next']:state['res_next']=free.pop()[0]
+    def destroy(o):
+        # Last reference released: the object's own resource memory returns (a texture level's
+        # surface belongs to its texture; device surfaces keep the device's reference).
+        d=o['data']
+        if d.get('destroyed'):return
+        if 'levels' in d:
+            for lv in d['levels']:res_release(lv['memory'],lv['size'])
+        elif 'length' in d and 'memory' in d:res_release(d['memory'],d['length'])
+        elif 'memory' in d and 'width' in d and d.get('level') is None:res_release(d['memory'],level_layout(d['format'],d['width'],d['height'])[1])
+        else:return
+        d['destroyed']=True
+    release_hooks.append(destroy)
     BUFFER_IFACES={}
     def buffer_iface(kind):
         if kind not in BUFFER_IFACES:
@@ -993,9 +1057,25 @@ def make(ctx):
     def _(o,a):dev(o)['clears']=dev(o).get('clears',0)+1;return D3D_OK
     class FramesReached(Exception):pass
     apis['FramesReached']=(0,FramesReached)
+    # Keyboard messages (as runtime/port_api.c): the game's menus read WM_KEYDOWN/WM_CHAR, not
+    # DirectInput. At each Present the scripted keyboard state for the new frame count is compared
+    # with the one delivered; each change posts WM_KEYDOWN (+ WM_CHAR) or WM_KEYUP to the focus window.
+    KEY_VK={0x01:(0x1b,0x1b),0x1c:(0x0d,0x0d),0x39:(0x20,0x20),0xc8:(0x26,0),0xd0:(0x28,0),0xcb:(0x25,0),0xcd:(0x27,0)}   # DIK: (VK, char)
+    state.setdefault('keys_delivered',set())
+    def key_messages():
+        frames=state['frames'];target=state['focus'] or state['active']
+        want={k for k,f,t in KEY_SCRIPT if k in KEY_VK and f<=frames<t}
+        for k in sorted(want^state['keys_delivered']):
+            vk,ch=KEY_VK[k];lp=1|((k&0x7f)<<16)|((1<<24) if k&0x80 else 0)
+            if k in want:
+                queue.append((target,0x100,vk,lp))
+                if ch:queue.append((target,0x102,ch,lp))
+            else:queue.append((target,0x101,vk,lp|0xc0000000))
+        state['keys_delivered']=want
     @device_method('Present')
     def _(o,a):
         dev(o)['frames']+=1;state['frames']=dev(o)['frames']
+        key_messages()
         if state['frames']>=ctx['frames']:raise FramesReached(f'{state["frames"]} frames presented')
         return D3D_OK
     for _name in ('DrawPrimitive','DrawIndexedPrimitive','DrawPrimitiveUP','DrawIndexedPrimitiveUP'):
@@ -1099,6 +1179,32 @@ def make(ctx):
     def _(a):mss['started']=False;return None
     @api('_AIL_set_preference@8',2)
     def _(a):old=mss['prefs'].get(a[0],0);mss['prefs'][a[0]]=a[1];return old
+    # AIL_process_digital_audio(dest, dest_size, dest_rate, dest_format, num_srcs, AILMIXINFO*):
+    # the game decompresses streamed IMA ADPCM (WAVE_FORMAT 0x11, mono, 4 bits) to 16-bit PCM
+    # at the same rate, block by block (each block: int16 sample, index, reserved, nibbles low
+    # first). Returns the bytes written. Other conversions are not modelled (fail closed).
+    IMA_INDEX=(-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8)
+    IMA_STEP=(7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,
+              337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,
+              4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767)
+    @api('_AIL_process_digital_audio@24',6)
+    def _(a):
+        dest,size,rate,fmt,count,info=a[:6];r32=ctx['r32']
+        fields=[r32(info+4*i) for i in range(9)]   # AILSOUNDINFO: format, data, length, rate, bits, channels, samples, block, initial
+        if count!=1 or fmt!=1 or fields[0]!=0x11 or fields[4]!=4 or fields[5]!=1 or fields[3]!=rate or fields[7]<5:
+            unsupported(f'AIL_process_digital_audio conversion {fields} to rate {rate} format {fmt} ({count} sources)')
+        block=fields[7];src=bytes(cpu.mem_read(fields[1],fields[2]));out=bytearray();limit=size//2
+        for b in range(0,len(src)-block+1,block):
+            pred=int.from_bytes(src[b:b+2],'little',signed=True);index=min(src[b+2],88);out+=pred.to_bytes(2,'little',signed=True)
+            for byte in src[b+4:b+block]:
+                for n in (byte&15,byte>>4):
+                    step=IMA_STEP[index];diff=step>>3
+                    if n&4:diff+=step
+                    if n&2:diff+=step>>1
+                    if n&1:diff+=step>>2
+                    pred=max(-32768,min(32767,pred-diff if n&8 else pred+diff));index=max(0,min(88,index+IMA_INDEX[n]))
+                    out+=pred.to_bytes(2,'little',signed=True)
+        out=out[:2*limit];cpu.mem_write(dest,bytes(out));return len(out)
     @api('_AIL_ms_count@0',0)
     def _(a):return tick()&0xffffffff
     @api('_AIL_open_digital_driver@16',4)

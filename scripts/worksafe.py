@@ -52,7 +52,8 @@ def check_android_java():
     source=ROOT/'android/app/src/main/java/com/manhuntae/android/MainActivity.java'
     if not javac.is_file() or not sdk.is_file() or not source.is_file(): raise WorkSafeError('JDK, Android 35 SDK or launcher source missing')
     output=ROOT/'build'/'android-java-check'; output.mkdir(parents=True,exist_ok=True)
-    argv=[str(javac),'-J-Xmx128m','-J-Djava.awt.headless=true','-proc:none','-source','11','-target','11','-classpath',str(sdk),'-d',str(output),str(source)]
+    argv=[str(javac),'-J-Xmx128m','-J-Djava.awt.headless=true','-proc:none','-source','11','-target','11','-classpath',str(sdk),'-d',str(output),
+          *sorted(str(p) for p in source.parent.glob('*.java'))]
     return _run_job(argv,60,'android-java-check',cfg,max_processes=1,memory_mb=384)
 
 def check_android_guest_memory():
@@ -1378,6 +1379,24 @@ def test_import_registry_on_s25():
     if result['timed_out'] or result['returncode']!=0 or not cleaned or 'MHAE_TESTS_PASSED' not in output:raise WorkSafeError('registry device test failed or cleanup unconfirmed')
     return {'tests':'registry, synthetic PE integration and Android boot clock passed','abi':'arm64-v8a','sha256':digest,'cleanup':'confirmed'}
 
+def build_game_library():
+    """Private build of libmh_game.so: the translated boot and WinMain (runtime/game_runner.c) with the
+    OpenGL ES backend, for GameActivity. Built only from the lifted unit that test_winmain validated."""
+    import hashlib
+    cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
+    if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
+    base=ROOT/'private/analysis/winmain';report=json.loads((base/'winmain_report.json').read_text(encoding='utf-8'))
+    if hashlib.sha256((base/'winmain_unit.c').read_bytes()).hexdigest()!=report['unit_sha256']:raise WorkSafeError('winmain unit changed since lift')
+    if not (base/'android/validated.json').is_file():raise WorkSafeError('winmain has not been validated on the S25')
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    includes=[str(ROOT/'private/pcrecomp/runtime/recomp32'),str(ROOT/'recomp'),str(ROOT/'runtime'),str(base)]
+    out=ROOT/'private/analysis/game/android';out.mkdir(parents=True,exist_ok=True);lib=out/'libmh_game.so'
+    built=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIC','-shared',
+                    *[x for d in includes for x in ('-I',d)],str(ROOT/'android/app/src/main/cpp/game_jni.c'),'-o',str(lib),
+                    '-lGLESv3','-lEGL','-landroid','-llog','-lm','-Wl,-z,max-page-size=16384'],1800,'game-library-build',cfg,max_processes=4,memory_mb=6144)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('game library build failed; inspect game-library-build logs')
+    return {'library':str(lib),'sha256':hashlib.sha256(lib.read_bytes()).hexdigest(),'distribution':'private: contains translated game code'}
+
 def build_diagnostic_apk():
     """Build a private diagnostic APK in bounded sequential jobs, without Gradle."""
     import sys, zipfile, xml.etree.ElementTree as ET
@@ -1439,6 +1458,9 @@ def build_diagnostic_apk():
             apk.write(binary,'lib/arm64-v8a/'+library)
             apk.writestr('assets/translated/'+asset,json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
             translated=translated or {};translated[library]=True
+        game=ROOT/'private/analysis/game/android/libmh_game.so'
+        if game.is_file() and game.stat().st_mtime>=max(p.stat().st_mtime for p in (ROOT/'android/app/src/main/cpp/game_jni.c',ROOT/'runtime/gles_renderer.c',ROOT/'runtime/game_runner.c',ROOT/'runtime/port_api.c',ROOT/'runtime/d3d_common.c')):
+            apk.write(game,'lib/arm64-v8a/libmh_game.so');translated=translated or {};translated['libmh_game.so']=True
     aligned=out/'aligned.apk'; signed=out/'diagnostic-debug.apk'
     run([str(align),'-f','4',str(unsigned),str(aligned)],'diagnostic-zipalign')
     run([str(java),'-Xmx128m','-Djava.awt.headless=true','-jar',str(signer),'sign','--ks',str(key),'--ks-pass','pass:android','--key-pass','pass:android','--out',str(signed),str(aligned)],'diagnostic-sign')
@@ -1558,13 +1580,16 @@ def run_loader_on_s25():
     return {'model':models[0] if len(models)==1 else None,'binary_sha256':digest,'cleanup':cleanup,'passed':passed,
             'comparison':Path(compared['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip()}
 
-def _run_binary_on_s25(binary,label,args='',max_size=4*1024*1024,timeout=180):
+def _run_binary_on_s25(binary,label,args='',max_size=4*1024*1024,timeout=180,env=None):
     """Upload one private ARM64 test binary to a fresh random directory on one S25, run it
     once with `"$d"` substituted in args, and remove exactly that file and directory.
     Returns the program's stdout (LF). Raises on failure or unconfirmed cleanup."""
     import base64,hashlib,re,secrets,textwrap
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or args not in ('','"$d"','/sdcard/mh-androidevolved/manhunt.exe','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved') or max_size>32*1024*1024:raise WorkSafeError('invalid device run parameters')
+    env=env or {}
+    if any(not re.fullmatch(r'MH_[A-Z_]{1,24}',k) or not re.fullmatch(r'[0-9a-f:,]{0,256}',v) for k,v in env.items()):raise WorkSafeError('invalid device environment')
+    prefix=''.join(f'{k}={v} ' for k,v in sorted(env.items()))
     adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
     if not adb.is_file():raise WorkSafeError('adb missing')
     if binary[:4]!=b'\x7fELF' or int.from_bytes(binary[18:20],'little')!=183 or len(binary)>max_size:raise WorkSafeError('not a bounded ARM64 ELF')
@@ -1604,7 +1629,7 @@ def _run_binary_on_s25(binary,label,args='',max_size=4*1024*1024,timeout=180):
         'set -- $(sha256sum "$p")\n'
         f'[ "${{1:-}}" = "{digest}" ] || exit 84\n'
         'chmod 700 "$p" || exit 85\n'
-        f'echo MHAE_BEGIN\n"$p" {args}; rc=$?\necho MHAE_END\n'
+        f'echo MHAE_BEGIN\n{prefix}"$p" {args}; rc=$?\necho MHAE_END\n'
         '[ "$rc" -eq 0 ] || { echo MHAE_PROGRAM_FAILED=$rc; exit 86; }\n'
         'echo MHAE_TESTS_PASSED\nexit 0\n').encode('ascii')
     attempt=ROOT/f'logs/device-{label}-attempt.json'
@@ -1701,43 +1726,54 @@ def test_boot_phase2(on_device=True):
     """Boot phase 2: CRT start-up and all 98 static initialisers translated, past the protection, on Windows x64 and the S25."""
     return _validate_unit_harness('boot_phase2','tests/boot_phase2_native.c',on_device=on_device,game_arg=True)
 
-def test_winmain(on_device=True,calllog=False):
-    """The boot up to WinMain's first frames, translated, over runtime/port_api.c, on Windows x64 and the S25,
-    compared with private/analysis/winmain/x86_reference.json (with calllog, the host also writes every call)."""
+def test_winmain(on_device=True,calls=False):
+    """The boot and WinMain, translated, over runtime/port_api.c, on Windows x64 and the S25, compared with
+    the x86 references: private/analysis/winmain/x86_reference.json and every scenario (another language
+    or input script) in winmain/scenarios/<name>/x86_reference.json, each replayed as it was traced
+    (frames, MH_KEYS, MH_LANG). With calls, the host also writes every call of the main reference."""
     import hashlib,sys
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     base=ROOT/'private/analysis/winmain';report=json.loads((base/'winmain_report.json').read_text(encoding='utf-8'))
     if hashlib.sha256((base/'winmain_unit.c').read_bytes()).hexdigest()!=report['unit_sha256']:raise WorkSafeError('winmain unit changed since lift')
-    reference=base/'x86_reference.json'
-    if json.loads(reference.read_text(encoding='utf-8')).get('unit_sha256')!=report['unit_sha256']:raise WorkSafeError('winmain x86 reference is stale')
+    references={'main':base/'x86_reference.json',**{p.parent.name:p for p in sorted((base/'scenarios').glob('*/x86_reference.json'))}}
+    for name,reference in references.items():
+        if json.loads(reference.read_text(encoding='utf-8')).get('unit_sha256')!=report['unit_sha256']:raise WorkSafeError(f'winmain x86 reference {name} is stale')
     includes=[str(ROOT/'private/pcrecomp/runtime/recomp32'),str(ROOT/'recomp'),str(ROOT/'runtime'),str(base)]
     cl,env=_msvc_env();exe=base/'winmain-test.exe'
     built=_run_job([str(cl),'/nologo','/Od','/std:c11',*[x for d in includes for x in ('/I',d)],'/Fo'+str(base)+'\\','/Fe'+str(exe),
                     str(ROOT/'tests/winmain_native.c'),'/link','/INCREMENTAL:NO'],1800,'winmain-host-build',cfg,max_processes=4,memory_mb=4096,env=env)
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('winmain host build failed; inspect winmain-host-build logs')
     game=ROOT/'Manhunt Collection'/'Manhunt'
-    run_env=dict(os.environ)
-    if calllog:run_env['MH_CALLLOG']=str(ROOT/'logs/winmain-calls-windows-x64.txt')
-    ran=_run_job([str(exe),str(game/'manhunt.exe'),str(game)],900,'winmain-host-run',cfg,max_processes=1,memory_mb=2048,env=run_env)
-    if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError(f'winmain host run failed with code {ran["returncode"]}')
-    def compare(path,platform):
-        r=_run_job([sys.executable,str(ROOT/'tests/compare_harness.py'),str(reference),str(path),platform],120,f'winmain-{platform}-compare',cfg,max_processes=1,memory_mb=768)
+    def replay(reference):   # as the reference was traced
+        ref=json.loads(reference.read_text(encoding='utf-8'))
+        return {'MH_FRAMES':str(ref['cases'][0]['frames']),'MH_KEYS':ref.get('keys',''),'MH_LANG':ref.get('lang','0409')}
+    def compare(reference,path,platform,name):
+        r=_run_job([sys.executable,str(ROOT/'tests/compare_harness.py'),str(reference),str(path),platform],120,f'winmain-{name}-{platform}-compare',cfg,max_processes=1,memory_mb=768)
         text=(Path(r['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace')+Path(r['log']+'.stderr.log').read_text(encoding='utf-8',errors='replace')).strip()
-        if r['returncode']!=0 or r['timed_out']:raise WorkSafeError(f'winmain differs on {platform}: {text[-300:]}')
+        if r['returncode']!=0 or r['timed_out']:raise WorkSafeError(f'winmain {name} differs on {platform}: {text[-300:]}')
         return text
-    results={'windows-x64':compare(ran['log']+'.stdout.log','windows-x64')}
+    results={}
+    for name,reference in references.items():
+        run_env=dict(os.environ);run_env.update(replay(reference))
+        if calls and name=='main':run_env['MH_CALLLOG']=str(ROOT/'logs/winmain-calls-windows-x64.txt')
+        ran=_run_job([str(exe),str(game/'manhunt.exe'),str(game)],1800,f'winmain-{name}-host-run',cfg,max_processes=1,memory_mb=2048,env=run_env)
+        if ran['returncode']!=0 or ran['timed_out']:raise WorkSafeError(f'winmain {name} host run failed with code {ran["returncode"]}')
+        results[name+' windows-x64']=compare(reference,ran['log']+'.stdout.log','windows-x64',name)
     if on_device:
         ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
         out=base/'android';out.mkdir(exist_ok=True);binary=out/'winmain_test'
         arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIE','-pie',
                       *[x for d in includes for x in ('-I',d)],str(ROOT/'tests/winmain_native.c'),'-o',str(binary),'-lm'],1800,'winmain-arm64-build',cfg,max_processes=4,memory_mb=6144)
         if arm['returncode']!=0 or arm['timed_out']:raise WorkSafeError('winmain ARM64 build failed')
-        output=_run_binary_on_s25(binary.read_bytes(),'winmain','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved',max_size=32*1024*1024,timeout=900)
-        jsonl=ROOT/'logs/winmain-arm64.jsonl';jsonl.write_text(output,encoding='utf-8')
-        results['android-arm64']=compare(jsonl,'android-arm64')
+        outputs={}
+        for name,reference in references.items():
+            output=_run_binary_on_s25(binary.read_bytes(),'winmain','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved',max_size=32*1024*1024,timeout=1800,env=replay(reference))
+            jsonl=ROOT/f'logs/winmain-{name}-arm64.jsonl';jsonl.write_text(output,encoding='utf-8')
+            results[name+' android-arm64']=compare(reference,jsonl,'android-arm64',name)
+            outputs[name]=hashlib.sha256(output.encode('utf-8')).hexdigest()
         (out/'validated.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
-            'output_sha256':hashlib.sha256(output.encode('utf-8')).hexdigest(),'compared_against':'private/analysis/winmain/x86_reference.json'},indent=2)+'\n',encoding='utf-8')
+            'output_sha256':outputs,'compared_against':{k:str(v.relative_to(ROOT)) for k,v in references.items()}},indent=2)+'\n',encoding='utf-8')
     return results
 
 def test_graphics_d3d8(on_device=True):

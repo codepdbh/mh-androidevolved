@@ -64,7 +64,23 @@ public final class MainActivity extends Activity {
         if (hasFolderPermission()) validateFolder(Uri.parse(preferences.getString("tree", "")));
         Button folder = new Button(this); folder.setText("Seleccionar carpeta del juego");
         folder.setOnClickListener(v -> selectFolder()); layout.addView(folder);
-        Button play = new Button(this); play.setText("Jugar · aún no disponible"); play.setEnabled(false); layout.addView(play);
+        Button play = new Button(this);
+        if (GameActivity.bundled(this)) {
+            play.setText("Jugar (intro y menú principal; lee " + GameActivity.GAME_DIR + ")");
+            play.setOnClickListener(v -> startActivity(new Intent(this, GameActivity.class).putExtra(GameActivity.EXTRA_LANGID, selectedLanguage())));
+        } else { play.setText("Jugar · aún no disponible"); play.setEnabled(false); }
+        layout.addView(play);
+        layout.addView(text("Idioma del juego", 16, Color.WHITE));
+        android.widget.RadioGroup languages = new android.widget.RadioGroup(this);
+        languages.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < GameActivity.LANGUAGES.length; i++) {
+            android.widget.RadioButton option = new android.widget.RadioButton(this);
+            option.setText(GameActivity.LANGUAGE_NAMES[i]); option.setTextColor(Color.LTGRAY); option.setId(1000 + i);
+            languages.addView(option);
+        }
+        languages.check(1000 + languageIndex(selectedLanguage()));
+        languages.setOnCheckedChangeListener((group, id) -> preferences.edit().putInt("langid", GameActivity.LANGUAGES[id - 1000]).apply());
+        layout.addView(languages);
         layout.addView(text("Código traducido del juego", 20, Color.WHITE));
         translatedStatus = text("Ejecuta en un proceso aislado la candidata de tiempo traducida con datos sintéticos y compara el resultado con el validado frente a x86. No arranca el juego.", 14, Color.LTGRAY);
         layout.addView(translatedStatus);
@@ -86,6 +102,17 @@ public final class MainActivity extends Activity {
         layout.addView(text("El usuario debe aportar sus propios archivos. Esta aplicación no incluye contenido comercial.", 14, Color.LTGRAY));
     }
 
+    /** The chosen language; by default the phone's, if the game has it, else English. */
+    private int selectedLanguage() {
+        if (preferences.contains("langid")) return preferences.getInt("langid", 0x0409);
+        String phone = java.util.Locale.getDefault().getLanguage();
+        for (int i = 0; i < GameActivity.LANGUAGE_CODES.length; i++) if (GameActivity.LANGUAGE_CODES[i].equals(phone)) return GameActivity.LANGUAGES[i];
+        return 0x0409;
+    }
+    private static int languageIndex(int langid) {
+        for (int i = 0; i < GameActivity.LANGUAGES.length; i++) if (GameActivity.LANGUAGES[i] == langid) return i;
+        return 0;
+    }
     private TextView text(String value, int size, int color) {
         TextView view = new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color);
         view.setPadding(0, dp(10), 0, dp(10)); return view;

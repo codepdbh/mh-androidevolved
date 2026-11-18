@@ -85,8 +85,21 @@ int mh_port_indices(mh_port *port, uint32_t *memory, uint32_t *length, uint32_t 
 
 /* Counters for the comparison with the reference. */
 uint64_t mh_port_clock(const mh_port *port);
+/* Real time for the app: the clock then follows now_ms (milliseconds, monotonic) from its current
+ * value. Without it (the default) the clock is virtual and the port deterministic. */
+void mh_port_set_clock(mh_port *port, uint64_t (*now_ms)(void *user), void *user);
 uint64_t mh_port_rdtsc(mh_port *port);   /* the guest's time-stamp counter */
 unsigned mh_port_frames(const mh_port *port);
+/* Keyboard (DirectInput scan codes, e.g. 0x1c Enter, 0x01 Escape) and mouse buttons (0x100 + n). A key reads as down while it
+ * is set live or while an input-script span covers the presented-frame count (from <= frames < to);
+ * the script is deterministic and shared with the reference (MH_KEYS="1c:10:14,01:30:32"). */
+typedef struct { unsigned key, from, to; } mh_port_key_span;
+/* The user's language as a Windows LANGID (default 0x0409). Manhunt: English 0x0409, French 0x040c,
+ * Italian 0x0410, Spanish 0x0c0a, German 0x0c07 (its German 0x0407 falls back to English). */
+void mh_port_set_language(mh_port *port, uint32_t langid);
+void mh_port_set_key(mh_port *port, unsigned key, int down);
+int mh_port_set_key_script(mh_port *port, const mh_port_key_span *spans, unsigned n);
+unsigned mh_port_parse_key_script(const char *text, mh_port_key_span *out, unsigned max);
 uint32_t mh_port_com_next(const mh_port *port);
 uint32_t mh_port_res_next(const mh_port *port);
 #endif

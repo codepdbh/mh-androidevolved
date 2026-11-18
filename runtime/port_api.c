@@ -62,6 +62,7 @@ typedef struct com_obj {
     uint32_t length, fvf, locks;
     /* texture */
     level levels[16]; unsigned nlevels;
+    int destroyed;
 } com_obj;
 
 typedef struct {
@@ -91,8 +92,15 @@ struct mh_port {
     uint32_t com_next; struct { int kind; uint32_t vtable; } ifaces[16]; unsigned nifaces; int iface_of_kind[K_KINDS];
     com_obj **objects; unsigned nobjects, capobjects;
     uint32_t res_next;
+    struct { uint32_t start, end; } *res_free; unsigned nres_free, capres_free;
+    uint32_t serial;                           /* resource contents versions, unique across reuse */
     unsigned frames;
     uint64_t tsc_reads;
+    uint64_t (*now_ms)(void *); void *now_user; uint64_t now_base;
+    uint32_t langid;                           /* GetUserDefaultLangID and friends */
+    uint8_t keys[256], mouse_buttons[8];       /* live input (DIK scan codes; mouse buttons) */
+    uint8_t keys_delivered[256];               /* keyboard state already posted as messages */
+    mh_port_key_span script[64]; unsigned nscript;
     mh_port_renderer renderer; int has_renderer; struct com_obj *device;
     /* Miles */
     uint32_t mss_redist, mss_scratch, mss_driver; int mss_provider_open, mss_started;
@@ -126,7 +134,14 @@ static void rstrip_bs(char *s) { size_t n = strlen(s); while (n && s[n - 1] == '
 static int32_t s32(uint32_t v) { return (int32_t)v; }
 static uint32_t lparam(int64_t lo, int64_t hi) { return (uint32_t)((lo & 0xffff) | ((hi & 0xffff) << 16)); }
 static int64_t floordiv(int64_t a, int64_t b) { int64_t q = a / b; if ((a % b) && ((a < 0) != (b < 0))) q--; return q; }
-static uint64_t tick(mh_port *P) { return ++P->clock; }
+/* Virtual clock: 1 ms per query (deterministic, as the reference). With a host clock
+ * (mh_port_set_clock) it follows real time instead, never going backwards. */
+static uint64_t tick(mh_port *P) {
+    if (!P->now_ms) return ++P->clock;
+    uint64_t real = 0x10000 + (P->now_ms(P->now_user) - P->now_base);
+    if (real > P->clock) P->clock = real;
+    return P->clock;
+}
 static uint32_t call_guest(mh_port *P, uint32_t fn, const uint32_t *args, unsigned n) {
     return P->host.call_guest(P->host.user, P->api_esp, fn, args, n);
 }
@@ -210,11 +225,56 @@ static com_obj *new_object(mh_port *P, int index) {
 }
 static uint32_t give(mh_port *P, uint32_t obj) { w32(P, obj + 4, r32(P, obj + 4) + 1); return obj; }
 static uint32_t addref(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)o; (void)h; uint32_t r = r32(P, a[0] + 4) + 1; w32(P, a[0] + 4, r); return r; }
-static uint32_t release(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)o; (void)h; uint32_t r = r32(P, a[0] + 4); r = r ? r - 1 : 0; w32(P, a[0] + 4, r); return r; }
+/* Resource memory: sizes rounded to 16; first fit in address order over the released blocks,
+ * else the top; reused memory is zeroed (the reference, tools/winmain_apis.py, does the same). */
 static uint32_t res_alloc(mh_port *P, uint32_t size) {
-    uint32_t start = (P->res_next + 15u) & ~15u;
+    size = (size + 15u) & ~15u;
+    for (unsigned i = 0; i < P->nres_free; i++) {
+        uint32_t s = P->res_free[i].start, e = P->res_free[i].end;
+        if (e - s < size) continue;
+        if (e - s == size) { memmove(&P->res_free[i], &P->res_free[i + 1], (P->nres_free - i - 1) * sizeof *P->res_free); P->nres_free--; }
+        else P->res_free[i].start = s + size;
+        zero(P, s, size); return s;
+    }
+    uint32_t start = P->res_next;
     if (start + size > MH_PORT_RES_LIMIT || start + size < start) fail(P, "Direct3D resource memory exhausted");
     P->res_next = start + size; return start;
+}
+static void res_release(mh_port *P, uint32_t start, uint32_t size) {
+    size = (size + 15u) & ~15u;
+    if (P->nres_free == P->capres_free) {
+        P->capres_free = P->capres_free ? 2 * P->capres_free : 256;
+        P->res_free = realloc(P->res_free, P->capres_free * sizeof *P->res_free); if (!P->res_free) fail(P, "out of host memory");
+    }
+    unsigned i = 0; while (i < P->nres_free && P->res_free[i].start < start) i++;
+    memmove(&P->res_free[i + 1], &P->res_free[i], (P->nres_free - i) * sizeof *P->res_free); P->nres_free++;
+    P->res_free[i].start = start; P->res_free[i].end = start + size;
+    if (i + 1 < P->nres_free && P->res_free[i].end == P->res_free[i + 1].start) {
+        P->res_free[i].end = P->res_free[i + 1].end;
+        memmove(&P->res_free[i + 1], &P->res_free[i + 2], (P->nres_free - i - 2) * sizeof *P->res_free); P->nres_free--;
+    }
+    if (i > 0 && P->res_free[i - 1].end == P->res_free[i].start) {
+        P->res_free[i - 1].end = P->res_free[i].end;
+        memmove(&P->res_free[i], &P->res_free[i + 1], (P->nres_free - i - 1) * sizeof *P->res_free); P->nres_free--;
+    }
+    if (P->nres_free && P->res_free[P->nres_free - 1].end == P->res_next) P->res_next = P->res_free[--P->nres_free].start;
+}
+static void level_layout(mh_port *P, uint32_t fmt, uint32_t w, uint32_t h, uint32_t *pitch, uint32_t *size);
+static void key_messages(mh_port *P);
+/* Last reference released: the object's own resource memory returns (a texture level's surface
+ * belongs to its texture; device surfaces keep the device's reference). */
+static void destroy(mh_port *P, com_obj *o) {
+    if (o->destroyed) return;
+    if (o->kind == K_TEXTURE) for (unsigned i = 0; i < o->nlevels; i++) res_release(P, o->levels[i].memory, o->levels[i].size);
+    else if (o->kind == K_VBUF || o->kind == K_IBUF) res_release(P, o->memory, o->length);
+    else if (o->kind == K_SURFACE && o->has_memory && !o->level_owner) { uint32_t pitch, size; level_layout(P, o->format, o->width, o->height, &pitch, &size); res_release(P, o->memory, size); }
+    else return;
+    o->destroyed = 1;
+}
+static uint32_t release(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
+    (void)h; uint32_t r = r32(P, a[0] + 4); r = r ? r - 1 : 0; w32(P, a[0] + 4, r);
+    if (!r && o) destroy(P, o);
+    return r;
 }
 
 /* ---------------------------------------------------------------- DirectInput 8 */
@@ -237,7 +297,24 @@ static uint32_t dev_unacquire(mh_port *P, com_obj *o, const uint32_t *a, int *h)
 static uint32_t dev_get_state(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     (void)h; if (!o->acquired) return DIERR_NOTACQUIRED;
     if (!o->has_format || a[1] != o->format) return DIERR_INVALIDPARAM;
-    zero(P, a[2], a[1]); return 0;
+    zero(P, a[2], a[1]);
+    if (!o->keyboard && (a[1] == 16 || a[1] == 20)) {   /* DIMOUSESTATE(2): buttons at +12 (script codes 0x100 + n) */
+        for (unsigned b = 0; b < a[1] - 12; b++) {
+            int down = P->mouse_buttons[b & 7] != 0;
+            for (unsigned i = 0; i < P->nscript && !down; i++)
+                down = P->script[i].key == 0x100 + b && P->frames >= P->script[i].from && P->frames < P->script[i].to;
+            if (down) { const uint8_t v = 0x80; wbytes(P, a[2] + 12 + b, &v, 1); }
+        }
+    }
+    if (o->keyboard && a[1] == 256) {   /* DIK scan codes: 0x80 when down (live state or the input script) */
+        for (unsigned k = 0; k < 256; k++) {
+            int down = P->keys[k] != 0;
+            for (unsigned i = 0; i < P->nscript && !down; i++)
+                down = P->script[i].key == k && P->frames >= P->script[i].from && P->frames < P->script[i].to;
+            if (down) { const uint8_t v = 0x80; wbytes(P, a[2] + k, &v, 1); }
+        }
+    }
+    return 0;
 }
 static uint32_t dev_set_format(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     (void)h; uint32_t f[4]; for (int i = 0; i < 4; i++) f[i] = r32(P, a[1] + 4 * i);
@@ -366,9 +443,9 @@ static uint32_t surf_lock(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     o->locked = 1; w32(P, a[1], o->pitch); w32(P, a[1] + 4, o->memory + offset); return D3D_OK;
 }
 static uint32_t surf_unlock(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
-    (void)P; (void)a; (void)h; if (!o->locked) return D3DERR_INVALIDCALL;
-    o->locked = 0; o->version++;
-    if (o->level_owner) o->level_owner->levels[o->level_index].version++;
+    (void)a; (void)h; if (!o->locked) return D3DERR_INVALIDCALL;
+    o->locked = 0; o->version = ++P->serial;
+    if (o->level_owner) o->level_owner->levels[o->level_index].version = P->serial;
     return D3D_OK;
 }
 static const com_method SURFACE_METHODS[] = {
@@ -380,7 +457,7 @@ static uint32_t buf_lock(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     if (offset > o->length || (size && (uint64_t)offset + size > o->length)) return D3DERR_INVALIDCALL;
     o->locks++; w32(P, out, o->memory + offset); return D3D_OK;
 }
-static uint32_t buf_unlock(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)a; (void)h; if (!o->locks) return D3DERR_INVALIDCALL; o->locks--; o->version++; return D3D_OK; }
+static uint32_t buf_unlock(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)a; (void)h; if (!o->locks) return D3DERR_INVALIDCALL; o->locks--; o->version = ++P->serial; return D3D_OK; }
 static uint32_t buf_desc(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     (void)h; int vertex = o->kind == K_VBUF; const uint32_t v[6] = {o->format, vertex ? 6u : 7u, o->usage, o->pool, o->length, o->fvf};
     for (int i = 0; i < (vertex ? 6 : 5); i++) w32(P, a[1] + 4 * i, v[i]);
@@ -409,7 +486,7 @@ static uint32_t tex_lock(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     uint32_t offset = a[3] ? block_offset(o, o->format, lv->pitch, r32(P, a[3]), r32(P, a[3] + 4)) : 0;
     lv->locked = 1; w32(P, a[2], lv->pitch); w32(P, a[2] + 4, lv->memory + offset); return D3D_OK;
 }
-static uint32_t tex_unlock(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)h; level *lv = tex_level(o, a[1]); if (!lv || !lv->locked) return D3DERR_INVALIDCALL; lv->locked = 0; lv->version++; return D3D_OK; }
+static uint32_t tex_unlock(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)h; level *lv = tex_level(o, a[1]); if (!lv || !lv->locked) return D3DERR_INVALIDCALL; lv->locked = 0; lv->version = ++P->serial; return D3D_OK; }
 static uint32_t tex_level_desc(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     (void)h; level *lv = tex_level(o, a[1]); if (!lv) return D3DERR_INVALIDCALL;
     const uint32_t v[8] = {o->format, 1, o->usage, o->pool, lv->size, 0, lv->width, lv->height};
@@ -519,6 +596,7 @@ static uint32_t dv_clear(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
 }
 static uint32_t dv_present(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
     (void)a; (void)h; o->frames++; P->frames = o->frames;
+    key_messages(P);
     if (P->has_renderer && P->renderer.present) P->renderer.present(P->renderer.user, P, P->frames);
     if (P->frames >= P->frame_limit) P->host.frames_reached(P->host.user, P->frames);
     return D3D_OK;
@@ -558,7 +636,7 @@ static uint32_t dv_create_texture(mh_port *P, com_obj *o, const uint32_t *a, int
     for (;;) {
         uint32_t pitch, size; level_layout(P, fmt, w, hh, &pitch, &size);
         if (n == 16) fail(P, "too many texture levels");
-        chain[n] = (level){w, hh, pitch, size, res_alloc(P, size), 0, 0, 0}; n++;
+        chain[n] = (level){w, hh, pitch, size, res_alloc(P, size), 0, ++P->serial, 0}; n++;
         if ((levels && n >= levels) || (w == 1 && hh == 1)) break;
         w = w / 2 ? w / 2 : 1; hh = hh / 2 ? hh / 2 : 1;
     }
@@ -591,8 +669,8 @@ static uint32_t dv_copy_rects(mh_port *P, com_obj *o, const uint32_t *a, int *h)
             if (row) memmove(to, from, row);
         }
     }
-    d->version++;
-    if (d->level_owner) d->level_owner->levels[d->level_index].version++;
+    d->version = ++P->serial;
+    if (d->level_owner) d->level_owner->levels[d->level_index].version = P->serial;
     return D3D_OK;
 }
 static uint32_t dv_create_ds(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
@@ -732,7 +810,7 @@ API(time_get_time) { (void)a; (void)h; return (uint32_t)tick(P); }
 API(time_period) { UNUSED; return 0; }
 API(qpf) { (void)h; w32(P, a[0], 1000000); w32(P, a[0] + 4, 0); return 1; }
 API(qpc) { (void)h; uint64_t us = tick(P) * 1000; w32(P, a[0], (uint32_t)us); w32(P, a[0] + 4, (uint32_t)(us >> 32)); return 1; }
-API(lang) { UNUSED; return 0x0409; }
+API(lang) { UNUSED; return P->langid; }
 API(set_error_mode) { (void)h; uint32_t old = P->error_mode; P->error_mode = a[0]; return old; }
 API(get_module_file_name) {
     (void)h; static const char path[] = MH_PORT_GAME_DIR "manhunt.exe"; uint32_t len = sizeof path - 1;
@@ -852,12 +930,28 @@ API(create_window) {
     return hwnd;
 }
 API(def_window_proc) { (void)h; if (a[1] == 0x10) fail(P, "DefWindowProcA for message 0x%x", a[1]); return 0; }
+#define KERNEL32 0x7ff00000u
 API(get_module_handle) {
     (void)h; if (a[0] == 0) return MH_PORT_IMAGE_BASE;
     char name[300]; cstr(P, a[0], name, 260); lower(name); slashes(name);
     const char *last = strrchr(name, '\\'); last = last ? last + 1 : name;
     if (!strcmp(last, "manhunt.exe") || !strcmp(last, "manhunt")) return MH_PORT_IMAGE_BASE;
+    if (!strcmp(last, "kernel32.dll") || !strcmp(last, "kernel32")) return KERNEL32;
     fail(P, "GetModuleHandleA('%s')", last); return 0;
+}
+/* kernel32 is a pseudo module: GetProcAddress resolves only functions the executable also imports
+ * (the result is that import's address), as the reference does. */
+API(get_proc_address) {
+    (void)h; char name[300] = "";
+    if (a[1] > 0xffff) cstr(P, a[1], name, 260);
+    if (a[0] == KERNEL32 && !strcmp(name, "GetDiskFreeSpaceExA")) return r32(P, 0x81b3c8);
+    fail(P, "GetProcAddress(0x%x, '%s')", a[0], name); return 0;
+}
+/* Save space: 8 GiB free of 16 GiB, for any directory. */
+API(get_disk_free_space) {
+    (void)h; const uint64_t v[3] = {8ull << 30, 16ull << 30, 8ull << 30};
+    for (int i = 0; i < 3; i++) if (a[1 + i]) { w32(P, a[1 + i], (uint32_t)v[i]); w32(P, a[1 + i] + 4, (uint32_t)(v[i] >> 32)); }
+    return 1;
 }
 /* files */
 #define INVALID_HANDLE 0xffffffffu
@@ -1116,6 +1210,28 @@ static void write_msg(mh_port *P, uint32_t at, const qmsg *m) {
     const uint32_t v[7] = {m->hwnd, m->msg, m->wp, m->lp, (uint32_t)P->clock, (uint32_t)P->cursor.x, (uint32_t)P->cursor.y};
     for (int i = 0; i < 7; i++) w32(P, at + 4 * i, v[i]);
 }
+/* Keyboard messages (as the reference): the game's menus read WM_KEYDOWN/WM_CHAR, not DirectInput.
+ * At each Present the keyboard state for the new frame count (script and live keys) is compared
+ * with the one delivered; each change posts WM_KEYDOWN (+ WM_CHAR) or WM_KEYUP to the focus window. */
+static int key_vk(unsigned k, uint32_t *vk, uint32_t *ch) {
+    static const uint32_t map[][3] = {{0x01,0x1b,0x1b},{0x1c,0x0d,0x0d},{0x39,0x20,0x20},{0xc8,0x26,0},{0xd0,0x28,0},{0xcb,0x25,0},{0xcd,0x27,0}};
+    for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++) if (map[i][0] == k) { *vk = map[i][1]; *ch = map[i][2]; return 1; }
+    return 0;
+}
+static void post(mh_port *P, qmsg m) { if (P->nqueue == 256) fail(P, "message queue full"); P->queue[P->nqueue++] = m; }
+static void key_messages(mh_port *P) {
+    uint32_t target = P->focus ? P->focus : P->active;
+    for (unsigned k = 0; k < 256; k++) {
+        uint32_t vk, ch; if (!key_vk(k, &vk, &ch)) continue;
+        int want = P->keys[k] != 0;
+        for (unsigned i = 0; i < P->nscript && !want; i++) want = P->script[i].key == k && P->frames >= P->script[i].from && P->frames < P->script[i].to;
+        if (want == (P->keys_delivered[k] != 0)) continue;
+        uint32_t lp = 1u | ((k & 0x7fu) << 16) | (k & 0x80 ? 1u << 24 : 0);
+        if (want) { post(P, (qmsg){target, 0x100, vk, lp}); if (ch) post(P, (qmsg){target, 0x102, ch, lp}); }
+        else post(P, (qmsg){target, 0x101, vk, lp | 0xc0000000u});
+        P->keys_delivered[k] = (uint8_t)want;
+    }
+}
 API(peek_message) { (void)h; qmsg m; if (!next_message(P, a[1], a[2], a[3], a[4] & 1, &m)) return 0; write_msg(P, a[0], &m); return 1; }
 API(get_message) { (void)h; qmsg m; if (!next_message(P, a[1], a[2], a[3], 1, &m)) fail(P, "GetMessageA would block with an empty queue"); write_msg(P, a[0], &m); return m.msg == WM_QUIT ? 0 : 1; }
 API(post_message) { (void)h; if (a[0] && !find_window(P, a[0])) { *mh_port_last_error(P) = 1400; return 0; } if (P->nqueue == 256) fail(P, "message queue full"); P->queue[P->nqueue++] = (qmsg){a[0], a[1], a[2], a[3]}; return 1; }
@@ -1180,6 +1296,36 @@ API(ail_set_preference) {
     (void)h; for (unsigned i = 0; i < P->nprefs; i++) if (P->prefs[i].k == a[0]) { uint32_t old = P->prefs[i].v; P->prefs[i].v = a[1]; return old; }
     if (P->nprefs == 32) fail(P, "too many Miles preferences");
     P->prefs[P->nprefs].k = a[0]; P->prefs[P->nprefs].v = a[1]; P->nprefs++; return 0;
+}
+/* AIL_process_digital_audio: streamed IMA ADPCM (0x11, mono, 4 bits) to 16-bit PCM at the same
+ * rate, block by block, as the reference (tools/winmain_apis.py); returns the bytes written. */
+static const int8_t IMA_INDEX[16] = {-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
+static const int16_t IMA_STEP[89] = {7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,
+    337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,
+    4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767};
+API(ail_process_audio) {
+    (void)h; uint32_t dest = a[0], size = a[1], rate = a[2], fmt = a[3], count = a[4], info = a[5], f[9];
+    for (int i = 0; i < 9; i++) f[i] = r32(P, info + 4 * i);
+    if (count != 1 || fmt != 1 || f[0] != 0x11 || f[4] != 4 || f[5] != 1 || f[3] != rate || f[7] < 5)
+        fail(P, "AIL_process_digital_audio conversion format 0x%x bits %u channels %u rate %u to rate %u format %u", f[0], f[4], f[5], f[3], rate, fmt);
+    uint32_t block = f[7], length = f[2], limit = size / 2, n = 0;
+    const uint8_t *src = length ? mh_mem_span(P->mem, f[1], length) : NULL;
+    if (length && !src) fail(P, "ADPCM source outside guest memory");
+    int16_t *out = malloc((size_t)limit * 2 + 2); if (!out && limit) fail(P, "out of host memory");
+    for (uint32_t b = 0; b + block <= length && n < limit; b += block) {
+        int pred = (int16_t)(src[b] | src[b + 1] << 8), index = src[b + 2] > 88 ? 88 : src[b + 2];
+        out[n++] = (int16_t)pred;
+        for (uint32_t i = b + 4; i < b + block; i++)
+            for (int half = 0; half < 2; half++) {
+                int nib = half ? src[i] >> 4 : src[i] & 15, step = IMA_STEP[index], diff = step >> 3;
+                if (nib & 4) diff += step; if (nib & 2) diff += step >> 1; if (nib & 1) diff += step >> 2;
+                pred = nib & 8 ? pred - diff : pred + diff; pred = pred < -32768 ? -32768 : pred > 32767 ? 32767 : pred;
+                index += IMA_INDEX[nib]; index = index < 0 ? 0 : index > 88 ? 88 : index;
+                if (n < limit) out[n++] = (int16_t)pred;
+            }
+    }
+    for (uint32_t i = 0; i < n; i++) { uint8_t le[2] = {(uint8_t)out[i], (uint8_t)((uint16_t)out[i] >> 8)}; wbytes(P, dest + 2 * i, le, 2); }
+    free(out); return 2 * n;
 }
 API(ail_ms_count) { (void)a; (void)h; return (uint32_t)tick(P); }
 API(ail_open_driver) { (void)h; if ((a[1] != 8 && a[1] != 16) || (a[2] != 1 && a[2] != 2)) return 0; P->mss_driver = 0x6D000001u; return P->mss_driver; }
@@ -1302,7 +1448,7 @@ static const struct { const char *name; unsigned nargs; api_handler fn; } APIS[]
     {"GetEnvironmentVariableA",3,get_env},{"LoadCursorA",2,load_cursor},{"RegisterClassA",1,register_class},{"GetSystemMetrics",1,get_system_metrics},
     {"SetCursorPos",2,set_cursor_pos},{"GetCursorPos",1,get_cursor_pos},{"ShowCursor",1,show_cursor},{"SetCursor",1,set_cursor},{"ClipCursor",1,clip_cursor},
     {"AdjustWindowRect",3,adjust_window_rect},{"CreateWindowExA",12,create_window},{"DefWindowProcA",4,def_window_proc},{"GetModuleHandleA",1,get_module_handle},
-    {"CreateFileA",7,create_file},{"ReadFile",5,read_file},{"GetOverlappedResult",4,get_overlapped_result},{"SetFilePointer",4,set_file_pointer},
+    {"GetProcAddress",2,get_proc_address},{"GetDiskFreeSpaceExA",4,get_disk_free_space},{"CreateFileA",7,create_file},{"ReadFile",5,read_file},{"GetOverlappedResult",4,get_overlapped_result},{"SetFilePointer",4,set_file_pointer},
     {"GetFileSize",2,get_file_size},{"CloseHandle",1,close_handle},{"CreateDirectoryA",2,create_directory},{"GetFileAttributesA",1,get_file_attributes},
     {"RegOpenKeyExA",5,reg_open},{"RegCreateKeyExA",9,reg_create},{"RegCloseKey",1,reg_close},{"RegSetValueExA",6,reg_set_value},{"RegQueryValueExA",6,reg_query_value},
     {"DialogBoxParamA",5,dialog_box},{"EndDialog",2,end_dialog},{"GetDlgItem",2,get_dlg_item},{"GetWindowRect",2,get_window_rect},{"GetClientRect",2,get_client_rect},
@@ -1314,7 +1460,7 @@ static const struct { const char *name; unsigned nargs; api_handler fn; } APIS[]
     {"GetActiveWindow",0,get_foreground_window},{"GetWindowLongA",2,get_window_long},{"SetWindowLongA",3,set_window_long},{"SetFocus",1,set_focus},
     {"GetFocus",0,get_focus},{"SendMessageA",4,send_message},
     {"_AIL_set_redist_directory@4",1,ail_redist},{"_AIL_startup@0",0,ail_startup},{"_AIL_shutdown@0",0,ail_shutdown},{"_AIL_set_preference@8",2,ail_set_preference},
-    {"_AIL_ms_count@0",0,ail_ms_count},{"_AIL_open_digital_driver@16",4,ail_open_driver},{"_AIL_close_digital_driver@4",1,ail_close_driver},
+    {"_AIL_ms_count@0",0,ail_ms_count},{"_AIL_process_digital_audio@24",6,ail_process_audio},{"_AIL_open_digital_driver@16",4,ail_open_driver},{"_AIL_close_digital_driver@4",1,ail_close_driver},
     {"_AIL_enumerate_3D_providers@12",3,ail_enum_providers},{"_AIL_open_3D_provider@4",1,ail_open_provider},{"_AIL_close_3D_provider@4",1,ail_close_provider},
     {"_AIL_set_3D_provider_preference@12",3,ail_provider_pref},{"_AIL_3D_provider_attribute@12",3,ail_provider_attribute},{"_AIL_set_3D_room_type@8",2,ail_set_room},
     {"_AIL_3D_room_type@4",1,ail_room},{"_AIL_allocate_3D_sample_handle@4",1,ail_allocate},{"_AIL_release_3D_sample_handle@4",1,ail_release},
@@ -1347,7 +1493,7 @@ mh_port *mh_port_create(mh_guest_memory *memory, const mh_port_host *host, const
     for (int k = 0; k < K_KINDS; k++) P->iface_of_kind[k] = -1;
     mh_win32_thread_init(&P->thread);
     if (!mh_win32_process_init(&P->process, memory, PROCESS_DATA) || !mh_win32_global_init(&P->global, GLOBAL_BASE, GLOBAL_SIZE)) { free(P); return NULL; }
-    P->clock = 0x10000; snprintf(P->cwd, sizeof P->cwd, "C:\\Manhunt");
+    P->clock = 0x10000; P->langid = 0x0409; snprintf(P->cwd, sizeof P->cwd, "C:\\Manhunt");
     P->cursor.x = 640; P->cursor.y = 360; P->cursor.handle = 0x60007f00u;
     P->com_next = MH_PORT_COM_HEAP; P->res_next = MH_PORT_RES_BASE;
     P->mss_redist = MH_PORT_MSS_SCRATCH; P->mss_scratch = MH_PORT_MSS_SCRATCH + 0x10;
@@ -1363,14 +1509,34 @@ void mh_port_destroy(mh_port *P) {
     if (!P) return;
     for (unsigned i = 0; i < P->nobjects; i++) free(P->objects[i]);
     for (unsigned i = 0; i < P->nreg; i++) { for (unsigned j = 0; j < P->reg[i].nvalues; j++) free(P->reg[i].values[j].data); free(P->reg[i].values); }
-    free(P->objects); free(P->files); free(P->reg); free(P->controls); free(P);
+    free(P->objects); free(P->files); free(P->reg); free(P->controls); free(P->res_free); free(P);
 }
 uint32_t *mh_port_last_error(mh_port *P) { return &P->thread.last_error; }
 uint32_t mh_port_cwd(mh_port *P, char *out, size_t size) { snprintf(out, size, "%s", P->cwd); return (uint32_t)strlen(P->cwd); }
 uint64_t mh_port_clock(const mh_port *P) { return P->clock; }
+void mh_port_set_clock(mh_port *P, uint64_t (*now_ms)(void *user), void *user) {
+    P->now_ms = now_ms; P->now_user = user; if (now_ms) P->now_base = now_ms(user) - (P->clock - 0x10000);
+}
 /* rdtsc: a 1 GHz counter on the virtual clock, strictly increasing (each read adds one). */
 uint64_t mh_port_rdtsc(mh_port *P) { return P->clock * 1000000u + ++P->tsc_reads; }
 unsigned mh_port_frames(const mh_port *P) { return P->frames; }
+void mh_port_set_language(mh_port *P, uint32_t langid) { P->langid = langid & 0xffff; }
+void mh_port_set_key(mh_port *P, unsigned key, int down) {
+    if (key < 256) P->keys[key] = down ? 1 : 0; else if (key - 0x100 < 8) P->mouse_buttons[key - 0x100] = down ? 1 : 0;
+}
+int mh_port_set_key_script(mh_port *P, const mh_port_key_span *spans, unsigned n) {
+    if (n > 64) return 0;
+    memcpy(P->script, spans, n * sizeof *spans); P->nscript = n; return 1;
+}
+unsigned mh_port_parse_key_script(const char *text, mh_port_key_span *out, unsigned max) {
+    unsigned n = 0;
+    while (text && *text && n < max) {
+        unsigned k, f, t; int used = 0;
+        if (sscanf(text, "%x:%u:%u%n", &k, &f, &t, &used) != 3 || k > 0x107) break;
+        out[n].key = k; out[n].from = f; out[n].to = t; n++; text += used; if (*text == ',') text++;
+    }
+    return n;
+}
 uint32_t mh_port_com_next(const mh_port *P) { return P->com_next; }
 uint32_t mh_port_res_next(const mh_port *P) { return P->res_next; }
 mh_win32_global_heap *mh_port_global(mh_port *P);

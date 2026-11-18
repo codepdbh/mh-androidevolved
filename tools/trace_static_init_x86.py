@@ -264,12 +264,20 @@ def main():
     cmdline=PROCESS_DATA+r32(0x82926c)
     for i,v in enumerate((RETURN_SENTINEL,opt.ImageBase,0,cmdline,10)):w32(STACK_TOP+4*i,v)
     werror=None;reached=None
-    try:cpu.emu_start(0x4c1080,RETURN_SENTINEL,timeout=600000000,count=500000000)
+    try:cpu.emu_start(0x4c1080,RETURN_SENTINEL,timeout=0,count=0)
     except UcError as exc:werror=f'faulted: {exc}'+(f' at {faults[-1][0]:#x} (eip {faults[-1][1]:#x})' if faults else '')+' recent blocks '+' '.join(hex(x) for x in recent)
     except SystemExit as exc:werror=str(exc)
     except extra['FramesReached'][1] as exc:werror=None;reached=str(exc)
     new_blocks=blocks-phase2_blocks
-    out=ROOT/'private/analysis/winmain';out.mkdir(parents=True,exist_ok=True)
+    out=ROOT/'private/analysis/winmain'
+    # Further scenarios (MH_SCENARIO=name: another language or input script) are written to
+    # winmain/scenarios/<name>/; tools/lift_winmain.py translates the union of all their code and
+    # scripts/worksafe.py test_winmain compares each one.
+    if os.environ.get('MH_SCENARIO'):
+        import re as _re
+        if not _re.fullmatch(r'[a-z0-9_]{1,32}',os.environ['MH_SCENARIO']):raise SystemExit('invalid scenario name')
+        out=out/'scenarios'/os.environ['MH_SCENARIO']
+    out.mkdir(parents=True,exist_ok=True)
     (out/'trace.json').write_text(json.dumps({'input_sha256':EXPECTED,'error':werror,'returned':werror is None and reached is None,'frames_reached':reached,'eax':cpu.reg_read(UC_X86_REG_EAX),
         'api_counts':dict(state['counts']),'unsupported_calls':state['calls'],'executed_blocks':sorted(hex(b) for b in new_blocks)},indent=1)+'\n',encoding='utf-8')
     (out/'calls.txt').write_text('\n'.join(calllog)+'\n',encoding='utf-8')
@@ -291,7 +299,7 @@ def main():
         unit=json.loads(report.read_text(encoding='utf-8'))['unit_sha256'] if report.exists() else None
         if os.environ.get('MH_DUMP'):open(os.environ['MH_DUMP'],'wb').write(read(0x67d000,0x8296d4-0x67d000))
         if os.environ.get('MH_DUMP_GLOBAL'):open(os.environ['MH_DUMP_GLOBAL'],'wb').write(read(GLOBAL_BASE,state['next']-GLOBAL_BASE))
-        (out/'x86_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'unit_sha256':unit,'cases':[case]},indent=1)+'\n',encoding='utf-8')
+        (out/'x86_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'unit_sha256':unit,'keys':os.environ.get('MH_KEYS',''),'lang':os.environ.get('MH_LANG','0409'),'cases':[case]},indent=1)+'\n',encoding='utf-8')
         print('WinMain x86 reference written: res memory',hex(res_next-0x10000000),'COM heap',hex(com['next']-0x1e40000),'calls',len(calllog))
     print('WinMain:',len(new_blocks),'new blocks; APIs',dict(state['counts']))
     print('WinMain STOP:',werror) if werror else print('WinMain: stopped after',reached) if reached else print('WinMain returned',hex(cpu.reg_read(UC_X86_REG_EAX)))

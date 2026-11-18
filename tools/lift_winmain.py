@@ -21,6 +21,12 @@ def main():
     if trace['input_sha256']!=EXPECTED or trace['error'] or not trace.get('frames_reached'):
         raise SystemExit('the WinMain x86 trace is missing or did not reach its frames; run tools/trace_static_init_x86.py --winmain')
     executed=phase2_executed()|{int(b,16) for b in trace['executed_blocks']}
+    # plus every recorded scenario (other languages, other input scripts)
+    for path in sorted((ROOT/'private/analysis/winmain/scenarios').glob('*/trace.json')):
+        scenario=json.loads(path.read_text(encoding='utf-8'))
+        if scenario['input_sha256']!=EXPECTED or scenario['error'] or not scenario.get('frames_reached'):
+            raise SystemExit(f'scenario {path.parent.name}: trace failed or from another executable')
+        executed|={int(b,16) for b in scenario['executed_blocks']}
     crt=[s for s in pe.sections if s.Name.rstrip(b'\0')==b'.CRT'][0];raw=crt.get_data()[:crt.Misc_VirtualSize]
     inits=[p for p in (int.from_bytes(raw[i:i+4],'little') for i in range(0,len(raw)//4*4,4)) if p]
     kept,stopped=executed_closure(data,[a for a,_ in STARTUP]+inits+[WINMAIN],executed,skip=REPLACED)
