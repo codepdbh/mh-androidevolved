@@ -16,6 +16,7 @@ IMAGE_BASE=0x400000
 import os as _os
 # Input script, shared with runtime/port_api.c: "key:from:to,..." (hex DIK scan code; the key is
 # down while from <= presented frames < to).
+MOUSE_STEP=8   # scripted mouse motion units per GetDeviceState (codes 0x200..0x203), as runtime/port_api.c
 KEY_SCRIPT=[(int(k,16),int(f),int(t)) for k,f,t in (x.split(':') for x in _os.environ.get('MH_KEYS','').split(',') if x)]
 def make(ctx):
     apis={};cpu,state=ctx['cpu'],ctx['state']
@@ -631,11 +632,16 @@ def make(ctx):
         if o['data']['kind']=='keyboard' and a[1]==256:   # input script MH_KEYS="1c:10:14,..." (as runtime/port_api.c)
             frames=state.get('frames',0)
             for k,f,t in KEY_SCRIPT:
-                if f<=frames<t:data[k]=0x80
+                if k<256 and f<=frames<t:data[k]=0x80
         if o['data']['kind']=='mouse' and a[1] in (16,20):   # buttons at +12: script codes 0x100+n
-            frames=state.get('frames',0)
+            frames=state.get('frames',0);dx=dy=0
             for k,f,t in KEY_SCRIPT:
                 if 0x100<=k<0x100+a[1]-12 and f<=frames<t:data[12+k-0x100]=0x80
+                if 0x200<=k<=0x203 and f<=frames<t:   # scripted motion: +X, -X, +Y, -Y (MOUSE_STEP per read)
+                    s=MOUSE_STEP if k in (0x200,0x202) else -MOUSE_STEP
+                    if k<0x202:dx+=s
+                    else:dy+=s
+            data[0:4]=(dx&0xffffffff).to_bytes(4,'little');data[4:8]=(dy&0xffffffff).to_bytes(4,'little')
         cpu.mem_write(a[2],bytes(data));return 0
     # Virtual devices: a 3-axis, 3-button traditional mouse and an enhanced 101/102-key keyboard,
     # attached, no POVs, no force feedback.

@@ -114,6 +114,9 @@ typedef struct { unsigned key, from, to; } mh_port_key_span;
  * Italian 0x0410, Spanish 0x0c0a, German 0x0c07 (its German 0x0407 falls back to English). */
 void mh_port_set_language(mh_port *port, uint32_t langid);
 void mh_port_set_key(mh_port *port, unsigned key, int down);
+/* Scripted mouse motion: script codes 0x200 (+X), 0x201 (-X), 0x202 (+Y), 0x203 (-Y) add this many units to each
+   mouse GetDeviceState while active (as tools/winmain_apis.py). */
+#define MH_PORT_MOUSE_STEP 8
 /* Live relative mouse motion (DirectInput units), read by the game's next mouse GetDeviceState. */
 void mh_port_mouse_move(mh_port *port, int dx, int dy);
 int mh_port_set_key_script(mh_port *port, const mh_port_key_span *spans, unsigned n);

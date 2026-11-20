@@ -302,8 +302,16 @@ static uint32_t dev_get_state(mh_port *P, com_obj *o, const uint32_t *a, int *h)
     if (!o->has_format || a[1] != o->format) return DIERR_INVALIDPARAM;
     zero(P, a[2], a[1]);
     if (!o->keyboard && (a[1] == 16 || a[1] == 20)) {   /* DIMOUSESTATE(2): lX, lY (live motion), buttons at +12 (script codes 0x100 + n) */
-        int32_t dx = P->mouse_dx, dy = P->mouse_dy;
-        if (dx || dy) { P->mouse_dx -= dx; P->mouse_dy -= dy; w32(P, a[2], (uint32_t)dx); w32(P, a[2] + 4, (uint32_t)dy); }
+        int32_t dx = P->mouse_dx, dy = P->mouse_dy, sx = 0, sy = 0;
+        P->mouse_dx -= dx; P->mouse_dy -= dy;
+        for (unsigned i = 0; i < P->nscript; i++) {   /* scripted motion: 0x200 +X, 0x201 -X, 0x202 +Y, 0x203 -Y */
+            unsigned k = P->script[i].key;
+            if (k < 0x200 || k > 0x203 || P->frames < P->script[i].from || P->frames >= P->script[i].to) continue;
+            int32_t s = (k == 0x200 || k == 0x202) ? MH_PORT_MOUSE_STEP : -MH_PORT_MOUSE_STEP;
+            if (k < 0x202) sx += s; else sy += s;
+        }
+        dx += sx; dy += sy;
+        if (dx || dy) { w32(P, a[2], (uint32_t)dx); w32(P, a[2] + 4, (uint32_t)dy); }
         for (unsigned b = 0; b < a[1] - 12; b++) {
             int down = P->mouse_buttons[b & 7] != 0;
             for (unsigned i = 0; i < P->nscript && !down; i++)
@@ -1554,7 +1562,7 @@ unsigned mh_port_parse_key_script(const char *text, mh_port_key_span *out, unsig
     unsigned n = 0;
     while (text && *text && n < max) {
         unsigned k, f, t; int used = 0;
-        if (sscanf(text, "%x:%u:%u%n", &k, &f, &t, &used) != 3 || k > 0x107) break;
+        if (sscanf(text, "%x:%u:%u%n", &k, &f, &t, &used) != 3 || (k > 0x107 && (k < 0x200 || k > 0x203))) break;
         out[n].key = k; out[n].from = f; out[n].to = t; n++; text += used; if (*text == ',') text++;
     }
     return n;
