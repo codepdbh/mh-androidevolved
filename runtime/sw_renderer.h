@@ -16,6 +16,8 @@ typedef struct mh_sw_renderer mh_sw_renderer;
 /* `log` (may be NULL) receives one line per clear/draw/present; `png_pattern` (may be NULL)
  * is a printf pattern with one %u for the frame number, e.g. "frame%03u.png". */
 mh_sw_renderer *mh_sw_renderer_create(mh_guest_memory *memory, FILE *log, const char *png_pattern);
+/* PNG frames are written from this presented frame on (default: all). */
+void mh_sw_renderer_set_first_frame(mh_sw_renderer *r, unsigned frame);
 void mh_sw_renderer_destroy(mh_sw_renderer *r);
 /* Fills a mh_port_renderer that routes the device's notifications to `r`. */
 void mh_sw_renderer_bind(mh_sw_renderer *r, mh_port_renderer *out);

@@ -67,6 +67,7 @@ typedef struct com_obj {
 
 typedef struct {
     int released; uint32_t status, loops, info[9], offset, loop_block[2]; int has_info; uint64_t started;
+    float volume; uint32_t playback_rate;   /* for the audio output only */
 } sample;
 typedef struct { uint32_t h, frames, rate, div; uint64_t start; char name[MAXPATH]; } bink;
 
@@ -100,8 +101,10 @@ struct mh_port {
     uint32_t langid;                           /* GetUserDefaultLangID and friends */
     uint8_t keys[256], mouse_buttons[8];       /* live input (DIK scan codes; mouse buttons) */
     uint8_t keys_delivered[256];               /* keyboard state already posted as messages */
+    volatile int32_t mouse_dx, mouse_dy;       /* live mouse motion not yet read by the game */
     mh_port_key_span script[64]; unsigned nscript;
     mh_port_renderer renderer; int has_renderer; struct com_obj *device;
+    mh_port_audio audio; int has_audio;
     /* Miles */
     uint32_t mss_redist, mss_scratch, mss_driver; int mss_provider_open, mss_started;
     struct { uint32_t k, v; } prefs[32]; unsigned nprefs;
@@ -298,7 +301,9 @@ static uint32_t dev_get_state(mh_port *P, com_obj *o, const uint32_t *a, int *h)
     (void)h; if (!o->acquired) return DIERR_NOTACQUIRED;
     if (!o->has_format || a[1] != o->format) return DIERR_INVALIDPARAM;
     zero(P, a[2], a[1]);
-    if (!o->keyboard && (a[1] == 16 || a[1] == 20)) {   /* DIMOUSESTATE(2): buttons at +12 (script codes 0x100 + n) */
+    if (!o->keyboard && (a[1] == 16 || a[1] == 20)) {   /* DIMOUSESTATE(2): lX, lY (live motion), buttons at +12 (script codes 0x100 + n) */
+        int32_t dx = P->mouse_dx, dy = P->mouse_dy;
+        if (dx || dy) { P->mouse_dx -= dx; P->mouse_dy -= dy; w32(P, a[2], (uint32_t)dx); w32(P, a[2] + 4, (uint32_t)dy); }
         for (unsigned b = 0; b < a[1] - 12; b++) {
             int down = P->mouse_buttons[b & 7] != 0;
             for (unsigned i = 0; i < P->nscript && !down; i++)
@@ -1214,7 +1219,10 @@ static void write_msg(mh_port *P, uint32_t at, const qmsg *m) {
  * At each Present the keyboard state for the new frame count (script and live keys) is compared
  * with the one delivered; each change posts WM_KEYDOWN (+ WM_CHAR) or WM_KEYUP to the focus window. */
 static int key_vk(unsigned k, uint32_t *vk, uint32_t *ch) {
-    static const uint32_t map[][3] = {{0x01,0x1b,0x1b},{0x1c,0x0d,0x0d},{0x39,0x20,0x20},{0xc8,0x26,0},{0xd0,0x28,0},{0xcb,0x25,0},{0xcd,0x27,0}};
+    static const uint32_t map[][3] = {{0x01,0x1b,0x1b},{0x1c,0x0d,0x0d},{0x39,0x20,0x20},{0xc8,0x26,0},{0xd0,0x28,0},{0xcb,0x25,0},{0xcd,0x27,0},
+        {0x0f,0x09,0x09},{0x2a,0x10,0},{0x1d,0x11,0},{0x11,0x57,0x77},{0x1e,0x41,0x61},{0x1f,0x53,0x73},{0x20,0x44,0x64},
+        {0x21,0x46,0x66},{0x10,0x51,0x71},{0x12,0x45,0x65},{0x13,0x52,0x72},{0x2d,0x58,0x78},
+        {0x02,0x31,0x31},{0x03,0x32,0x32},{0x04,0x33,0x33},{0x05,0x34,0x34}};   /* DIK, VK, WM_CHAR: as the reference */
     for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++) if (map[i][0] == k) { *vk = map[i][1]; *ch = map[i][2]; return 1; }
     return 0;
 }
@@ -1349,6 +1357,17 @@ API(ail_provider_attribute) {
 }
 API(ail_set_room) { P->room = a[1]; *h = 0; return 0; }
 API(ail_room) { (void)a; (void)h; return P->room; }
+/* Audio output (mh_port_set_audio): every change of a sample is reported with its whole state.
+ * Output only: what the game observes (status, offsets) stays on the virtual clock. */
+static void sound_event(mh_port *P, uint32_t h, const sample *s, int event) {
+    if (!P->has_audio || !P->audio.sound) return;
+    mh_port_sound d; memset(&d, 0, sizeof d);
+    d.handle = h; d.status = s->status; d.loops = s->loops; d.loop_start = s->loop_block[0]; d.loop_end = s->loop_block[1];
+    d.volume = s->volume; d.playback_rate = s->playback_rate;
+    if (s->has_info) { d.format = s->info[0]; d.data = s->info[1]; d.length = s->info[2]; d.rate = s->info[3]; d.bits = s->info[4];
+                       d.channels = s->info[5]; d.samples = s->info[6]; d.block = s->info[7]; }
+    P->audio.sound(P->audio.user, P, &d, event);
+}
 static sample *need_sample(mh_port *P, uint32_t h) {
     if (h < 0x6F000004u || ((h - 0x6F000004u) & 3) || (h - 0x6F000004u) / 4 >= P->nsamples) fail(P, "unknown 3D sample handle 0x%x", h);
     return &P->samples[(h - 0x6F000004u) / 4];
@@ -1368,19 +1387,19 @@ API(ail_allocate) {
     unsigned live = 0; for (unsigned i = 0; i < P->nsamples; i++) live += !P->samples[i].released;
     if (live >= 32) return 0;
     if (P->nsamples == 64) fail(P, "too many 3D samples");
-    sample *s = &P->samples[P->nsamples]; memset(s, 0, sizeof *s); s->status = SMP_DONE; s->loops = 1;
+    sample *s = &P->samples[P->nsamples]; memset(s, 0, sizeof *s); s->status = SMP_DONE; s->loops = 1; s->volume = 1.0f;
     return 0x6F000004u + 4 * P->nsamples++;
 }
-API(ail_release) { need_sample(P, a[0])->released = 1; *h = 0; return 0; }
+API(ail_release) { sample *s = need_sample(P, a[0]); s->released = 1; sound_event(P, a[0], s, MH_SOUND_RELEASE); *h = 0; return 0; }
 API(ail_set_info) {
     (void)h; sample *s = need_sample(P, a[0]); uint32_t info[9]; for (int i = 0; i < 9; i++) info[i] = r32(P, a[1] + 4 * i);
     if ((info[0] != 1 && info[0] != 0x11) || (info[5] != 1 && info[5] != 2)) return 0;
-    memcpy(s->info, info, sizeof info); s->has_info = 1; s->status = SMP_DONE; s->offset = 0; return 1;
+    memcpy(s->info, info, sizeof info); s->has_info = 1; s->status = SMP_DONE; s->offset = 0; sound_event(P, a[0], s, MH_SOUND_END); return 1;
 }
-API(ail_start) { sample *s = need_sample(P, a[0]); s->status = SMP_PLAYING; s->started = P->clock; s->offset = 0; *h = 0; return 0; }
-API(ail_stop) { sample *s = need_sample(P, a[0]); if (update(P, s) == SMP_PLAYING) { s->status = SMP_STOPPED; s->offset = (uint32_t)(P->clock - s->started); } *h = 0; return 0; }
-API(ail_resume) { sample *s = need_sample(P, a[0]); if (s->status == SMP_STOPPED) { s->status = SMP_PLAYING; s->started = P->clock - s->offset; } *h = 0; return 0; }
-API(ail_end) { need_sample(P, a[0])->status = SMP_DONE; *h = 0; return 0; }
+API(ail_start) { sample *s = need_sample(P, a[0]); s->status = SMP_PLAYING; s->started = P->clock; s->offset = 0; sound_event(P, a[0], s, MH_SOUND_START); *h = 0; return 0; }
+API(ail_stop) { sample *s = need_sample(P, a[0]); if (update(P, s) == SMP_PLAYING) { s->status = SMP_STOPPED; s->offset = (uint32_t)(P->clock - s->started); sound_event(P, a[0], s, MH_SOUND_STOP); } *h = 0; return 0; }
+API(ail_resume) { sample *s = need_sample(P, a[0]); if (s->status == SMP_STOPPED) { s->status = SMP_PLAYING; s->started = P->clock - s->offset; sound_event(P, a[0], s, MH_SOUND_RESUME); } *h = 0; return 0; }
+API(ail_end) { sample *s = need_sample(P, a[0]); s->status = SMP_DONE; sound_event(P, a[0], s, MH_SOUND_END); *h = 0; return 0; }
 API(ail_status) { (void)h; return update(P, need_sample(P, a[0])); }
 API(ail_length) { (void)h; sample *s = need_sample(P, a[0]); return s->has_info ? s->info[2] : 0; }
 API(ail_offset) {
@@ -1389,8 +1408,10 @@ API(ail_offset) {
     uint64_t ms = sample_ms(s); if (ms < 1) ms = 1;
     return (uint32_t)((uint64_t)s->info[2] * ((P->clock - s->started) % ms) / ms);
 }
-API(ail_loop_count) { need_sample(P, a[0])->loops = a[1]; *h = 0; return 0; }
-API(ail_loop_block) { sample *s = need_sample(P, a[0]); s->loop_block[0] = a[1]; s->loop_block[1] = a[2]; *h = 0; return 0; }
+API(ail_loop_count) { sample *s = need_sample(P, a[0]); s->loops = a[1]; sound_event(P, a[0], s, MH_SOUND_CHANGE); *h = 0; return 0; }
+API(ail_loop_block) { sample *s = need_sample(P, a[0]); s->loop_block[0] = a[1]; s->loop_block[1] = a[2]; sound_event(P, a[0], s, MH_SOUND_CHANGE); *h = 0; return 0; }
+API(ail_set_volume) { sample *s = need_sample(P, a[0]); memcpy(&s->volume, &a[1], 4); sound_event(P, a[0], s, MH_SOUND_CHANGE); *h = 0; return 0; }
+API(ail_set_rate) { sample *s = need_sample(P, a[0]); s->playback_rate = a[1]; sound_event(P, a[0], s, MH_SOUND_CHANGE); *h = 0; return 0; }
 API(ail_setter) { need_sample(P, a[0]); *h = 0; return 0; }
 /* Bink */
 static bink *need_bink(mh_port *P, uint32_t h) { for (unsigned i = 0; i < P->nbinks; i++) if (P->binks[i].h == h) return &P->binks[i]; fail(P, "unknown Bink handle 0x%x", h); return NULL; }
@@ -1467,8 +1488,8 @@ static const struct { const char *name; unsigned nargs; api_handler fn; } APIS[]
     {"_AIL_set_3D_sample_info@8",2,ail_set_info},{"_AIL_start_3D_sample@4",1,ail_start},{"_AIL_stop_3D_sample@4",1,ail_stop},{"_AIL_resume_3D_sample@4",1,ail_resume},
     {"_AIL_end_3D_sample@4",1,ail_end},{"_AIL_3D_sample_status@4",1,ail_status},{"_AIL_3D_sample_length@4",1,ail_length},{"_AIL_3D_sample_offset@4",1,ail_offset},
     {"_AIL_set_3D_sample_loop_count@8",2,ail_loop_count},{"_AIL_set_3D_sample_loop_block@12",3,ail_loop_block},{"_AIL_set_3D_position@16",4,ail_setter},
-    {"_AIL_set_3D_sample_volume@8",2,ail_setter},{"_AIL_set_3D_sample_distances@12",3,ail_setter},{"_AIL_set_3D_sample_effects_level@8",2,ail_setter},
-    {"_AIL_set_3D_sample_occlusion@8",2,ail_setter},{"_AIL_set_3D_sample_playback_rate@8",2,ail_setter},
+    {"_AIL_set_3D_sample_volume@8",2,ail_set_volume},{"_AIL_set_3D_sample_distances@12",3,ail_setter},{"_AIL_set_3D_sample_effects_level@8",2,ail_setter},
+    {"_AIL_set_3D_sample_occlusion@8",2,ail_setter},{"_AIL_set_3D_sample_playback_rate@8",2,ail_set_rate},
     {"_BinkSetSoundSystem@8",2,bink_sound},{"_BinkOpen@8",2,bink_open},{"_BinkBufferOpen@16",4,bink_buffer_open},{"_BinkSetVolume@12",3,bink_volume},
     {"_BinkWait@4",1,bink_wait},{"_BinkDoFrame@4",1,bink_do_frame},{"_BinkCopyToBufferRect@44",11,bink_copy},{"_BinkNextFrame@4",1,bink_next},{"_BinkClose@4",1,bink_close},
     {"DirectInput8Create",5,direct_input_create},{"Direct3DCreate8",1,direct3d_create}};
@@ -1520,6 +1541,7 @@ void mh_port_set_clock(mh_port *P, uint64_t (*now_ms)(void *user), void *user) {
 /* rdtsc: a 1 GHz counter on the virtual clock, strictly increasing (each read adds one). */
 uint64_t mh_port_rdtsc(mh_port *P) { return P->clock * 1000000u + ++P->tsc_reads; }
 unsigned mh_port_frames(const mh_port *P) { return P->frames; }
+void mh_port_mouse_move(mh_port *P, int dx, int dy) { P->mouse_dx += dx; P->mouse_dy += dy; }
 void mh_port_set_language(mh_port *P, uint32_t langid) { P->langid = langid & 0xffff; }
 void mh_port_set_key(mh_port *P, unsigned key, int down) {
     if (key < 256) P->keys[key] = down ? 1 : 0; else if (key - 0x100 < 8) P->mouse_buttons[key - 0x100] = down ? 1 : 0;
@@ -1543,6 +1565,7 @@ mh_win32_global_heap *mh_port_global(mh_port *P);
 mh_win32_global_heap *mh_port_global(mh_port *P) { return &P->global; }
 
 /* ---------------------------------------------------------------- renderer interface */
+void mh_port_set_audio(mh_port *P, const mh_port_audio *a) { if (a) { P->audio = *a; P->has_audio = 1; } else P->has_audio = 0; }
 void mh_port_set_renderer(mh_port *P, const mh_port_renderer *r) { if (r) { P->renderer = *r; P->has_renderer = 1; } else P->has_renderer = 0; }
 int mh_port_device_size(mh_port *P, uint32_t *w, uint32_t *h) { if (!P->device) return 0; *w = P->device->params.width; *h = P->device->params.height; return 1; }
 uint32_t mh_port_render_state(mh_port *P, uint32_t s) {
@@ -1592,4 +1615,22 @@ int mh_port_indices(mh_port *P, uint32_t *memory, uint32_t *length, uint32_t *fo
     com_obj *b = object(P, P->device->indices[0]);
     if (!b || b->kind != K_IBUF) return 0;
     *memory = b->memory; *length = b->length; *format = b->format; *base_vertex = P->device->indices[1]; return 1;
+}
+
+unsigned mh_port_lights(mh_port *P, uint32_t (*out)[26], unsigned max) {
+    com_obj *d = P->device; unsigned n = 0; if (!d) return 0;
+    for (unsigned i = 0; i < d->nlight_enable && n < max; i++) {
+        if (!d->light_enable[i].v) continue;
+        for (unsigned j = 0; j < d->nlights; j++)
+            if (d->lights[j].index == d->light_enable[i].k) { memcpy(out[n++], d->lights[j].l, sizeof d->lights[j].l); break; }
+    }
+    return n;
+}
+void mh_port_material(mh_port *P, uint32_t out[17]) {
+    if (P->device) memcpy(out, P->device->material, 17 * sizeof *out); else memset(out, 0, 17 * sizeof *out);
+}
+int mh_port_render_target(mh_port *P, uint32_t *memory, uint32_t *width, uint32_t *height, uint32_t *format) {
+    com_obj *d = P->device; if (!d || !d->render_target || d->render_target == d->back_buffer) return 0;
+    com_obj *s = object(P, d->render_target); if (!s) return 0;
+    *memory = s->has_memory ? s->memory : 0;   /* read only: the guest's state is never changed here */ *width = s->width; *height = s->height; *format = s->format; return 1;
 }

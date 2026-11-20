@@ -61,7 +61,9 @@ def main():
     state={'next':GLOBAL_BASE,'tls':{},'events':0,'calls':[],'counts':Counter(),'last_error':0,'redirects':Counter()}
     redirects=json.loads((ROOT/'private/analysis/protection/redirects.json').read_text(encoding='utf-8'))
     if redirects['input_sha256']!=EXPECTED:raise SystemExit('stale protection redirects')
-    sites={int(x['return'],16):x['kind'] for x in redirects['slot_sites']}
+    sites={int(x['return'],16):('integrity' if x['kind']=='bounded' else x['kind']) for x in redirects['slot_sites']}
+    site_values={int(x['return'],16):int(x.get('value','0'),16) for x in redirects['slot_sites']}
+    site_args={int(x['return'],16):x.get('args',0) for x in redirects['slot_sites']}
     prus_target=r32(0x850000)
     ARGS={'InitializeCriticalSection':1,'EnterCriticalSection':1,'LeaveCriticalSection':1,'DeleteCriticalSection':1,'GlobalAlloc':2,'GlobalFree':1,
           'TlsGetValue':1,'TlsSetValue':2,'TlsAlloc':0,'TlsFree':1,'GetStdHandle':1,'GetCurrentProcess':0,'DuplicateHandle':7,'GetCommandLineA':0,'GetEnvironmentStrings':0,'FreeEnvironmentStringsA':1,'CreateEventA':4,'GetTickCount':0}
@@ -176,6 +178,41 @@ def main():
         if bytes(uc.mem_read(address,2))!=RDTSC:return
         tsc['reads']+=1;v=state.get('clock',0x10000)*1000000+tsc['reads']
         uc.reg_write(UC_X86_REG_EAX,v&0xffffffff);uc.reg_write(UC_X86_REG_EDX,(v>>32)&0xffffffff);uc.reg_write(UC_X86_REG_EIP,address+2)
+    # fyl2x / fyl2xp1 outside their domain: Unicorn (old QEMU) leaves the stack unchanged and sets C2,
+    # where an x87 produces a result and pops: NaN operands propagate, a negative argument (x < 0,
+    # or x <= -1 for fyl2xp1) gives the indefinite NaN, and log2(0) gives -inf times y (indefinite
+    # when y is 0); the port follows the hardware (recomp/x87_semantics.h). The hook sets ST0 = 2.0 and
+    # ST1 = that result, so the instruction itself computes log2(2) * result and pops.
+    import math
+    from unicorn.x86_const import UC_X86_REG_FPSW,UC_X86_REG_FP0
+    def f80_read(i):
+        top=(cpu.reg_read(UC_X86_REG_FPSW)>>11)&7;mant,exp=cpu.reg_read(UC_X86_REG_FP0+((top+i)&7))
+        sign=-1.0 if exp&0x8000 else 1.0;e=exp&0x7fff
+        if e==0x7fff:return float('nan') if mant&0x7fffffffffffffff else sign*math.inf
+        return sign*math.ldexp(mant,e-16383-63) if mant else sign*0.0
+    def f80_write(i,v):
+        top=(cpu.reg_read(UC_X86_REG_FPSW)>>11)&7
+        if v!=v:raw=(0xC000000000000000,0xFFFF)   # the x87 indefinite (negative quiet NaN)
+        elif math.isinf(v):raw=(0x8000000000000000,0xFFFF if v<0 else 0x7FFF)
+        elif v==0:raw=(0,0x8000 if math.copysign(1,v)<0 else 0)
+        else:
+            m,e=math.frexp(abs(v));raw=(int(m*(1<<64))&0xffffffffffffffff,(e-1+16383)|(0x8000 if v<0 else 0))
+        cpu.reg_write(UC_X86_REG_FP0+((top+i)&7),raw)
+    LOG_OPS={bytes((0xd9,0xf1)):0,bytes((0xd9,0xf9)):1}
+    def x87_log_domain(uc,address,size,user):
+        op=LOG_OPS.get(bytes(uc.mem_read(address,2)))
+        if op is None:return
+        x,y=f80_read(0),f80_read(1)
+        if x!=x or y!=y:r=float('nan')
+        elif (op==0 and x<0) or (op==1 and x<=-1):r=float('nan')
+        elif op==0 and x==0:r=float('nan') if y==0 else (-math.inf if y>0 else math.inf)
+        else:return   # in the domain: Unicorn computes it
+        f80_write(1,r);f80_write(0,2.0)
+    for lo,hi in ((0x401000,0x66e200),(0x66f000,0x66f451)):
+        code=bytes(cpu.mem_read(lo,hi-lo))
+        for pat in LOG_OPS:
+            at=code.find(pat)
+            while at>=0:cpu.hook_add(UC_HOOK_CODE,x87_log_domain,begin=lo+at,end=lo+at);at=code.find(pat,at+1)
     for lo,hi in ((0x401000,0x66e200),(0x66f000,0x66f451)):
         code=bytes(cpu.mem_read(lo,hi-lo));at=code.find(RDTSC)
         while at>=0:cpu.hook_add(UC_HOOK_CODE,virtual_rdtsc,begin=lo+at,end=lo+at);at=code.find(RDTSC,at+1)
@@ -206,6 +243,15 @@ def main():
             try:bad=0 if not size_ else (cpu.mem_read(pointer,size_) is None)
             except UcError:bad=1
             cpu.reg_write(UC_X86_REG_EAX,int(bad));pop=12
+        elif kind=='integrity':cpu.reg_write(UC_X86_REG_EAX,site_values[ret]);pop=4+4*site_args[ret]   # the answer of an intact copy (as runtime/game_runner.c)
+        elif kind=='mirror':
+            h=site_args[ret]&0x7f
+            if site_args[ret]&0x80:w32(r32(esp+4+4*h+4),site_values[ret])
+            cpu.reg_write(UC_X86_REG_EAX,site_values[ret]);pop=4+4*h
+        elif kind=='store':
+            ecx=cpu.reg_read(UC_X86_REG_ECX);w32(cpu.reg_read(UC_X86_REG_EBX),ecx);cpu.reg_write(UC_X86_REG_EAX,ecx);pop=4
+        elif kind=='resume':   # the intact wrapper drops its arguments and continues at esi's label
+            state['redirects'][kind]+=1;cpu.reg_write(UC_X86_REG_ESP,esp+4+4*site_args[ret]);cpu.reg_write(UC_X86_REG_EIP,site_values[ret]);return
         else:raise SystemExit(f'protection trigger site returning to {ret:#x} reached; not handled yet')
         state['redirects'][kind]+=1
         cpu.reg_write(UC_X86_REG_ESP,esp+pop);cpu.reg_write(UC_X86_REG_EIP,ret)

@@ -8,23 +8,48 @@
 #include <string.h>
 
 typedef struct { uint32_t memory, version, format, width, height; uint8_t *rgba; } tex_entry;
+/* A render target other than the back buffer, sampled directly when the game uses its texture. */
+typedef struct { uint32_t memory, width, height; uint8_t *color; float *depth; } sw_target;
 struct mh_sw_renderer {
     mh_guest_memory *mem; FILE *log; char png[512];
-    uint32_t width, height; uint8_t *color; float *depth;
+    uint32_t width, height; uint8_t *color; float *depth;          /* the current target */
+    uint32_t bw, bh; uint8_t *bcolor; float *bdepth;               /* the back buffer */
     tex_entry cache[256]; unsigned ncache;
+    sw_target targets[32]; unsigned ntargets;
+    unsigned png_from;                                             /* MH_RENDER_FROM: first frame written */
 };
 
 static int ensure(mh_sw_renderer *r, mh_port *port) {
     uint32_t w, h;
     if (!mh_port_device_size(port, &w, &h) || !w || !h) return 0;
-    if (w != r->width || h != r->height) {
-        free(r->color); free(r->depth);
-        r->color = calloc((size_t)w * h, 4); r->depth = malloc((size_t)w * h * sizeof(float));
-        if (!r->color || !r->depth) return 0;
-        for (size_t i = 0; i < (size_t)w * h; i++) { r->depth[i] = 1.0f; r->color[4 * i + 3] = 255; }
-        r->width = w; r->height = h;
+    if (w != r->bw || h != r->bh) {
+        free(r->bcolor); free(r->bdepth);
+        r->bcolor = calloc((size_t)w * h, 4); r->bdepth = malloc((size_t)w * h * sizeof(float));
+        if (!r->bcolor || !r->bdepth) return 0;
+        for (size_t i = 0; i < (size_t)w * h; i++) { r->bdepth[i] = 1.0f; r->bcolor[4 * i + 3] = 255; }
+        r->bw = w; r->bh = h;
     }
+    uint32_t mem = 0, tw = 0, th = 0, tf = 0;
+    if (mh_port_render_target(port, &mem, &tw, &th, &tf) && tw && th && tw <= 4096 && th <= 4096) {
+        sw_target *t = NULL;
+        for (unsigned i = 0; i < r->ntargets; i++) if (r->targets[i].memory == mem && r->targets[i].width == tw && r->targets[i].height == th) t = &r->targets[i];
+        if (!t) {
+            if (r->ntargets == 32) { free(r->targets[0].color); free(r->targets[0].depth); memmove(r->targets, r->targets + 1, 31 * sizeof *r->targets); r->ntargets--; }
+            t = &r->targets[r->ntargets++]; t->memory = mem; t->width = tw; t->height = th;
+            t->color = calloc((size_t)tw * th, 4); t->depth = malloc((size_t)tw * th * sizeof(float));
+            if (!t->color || !t->depth) return 0;
+            for (size_t i = 0; i < (size_t)tw * th; i++) t->depth[i] = 1.0f;
+        }
+        r->color = t->color; r->depth = t->depth; r->width = tw; r->height = th;
+        return 1;
+    }
+    r->color = r->bcolor; r->depth = r->bdepth; r->width = r->bw; r->height = r->bh;
     return 1;
+}
+static const sw_target *target_for(const mh_sw_renderer *r, uint32_t memory) {
+    if (!memory) return NULL;
+    for (unsigned i = 0; i < r->ntargets; i++) if (r->targets[i].memory == memory) return &r->targets[i];
+    return NULL;
 }
 static const uint8_t *texture(mh_sw_renderer *r, const mh_port_texture_info *t) {
     tex_entry *e = NULL;
@@ -137,7 +162,9 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
     if (!ensure(r, port)) return;
     mh_d3d_pixel_state s; mh_d3d_pixel_state_get(port, &s);
     pipeline pl = {&s, NULL, 0, 0};
-    if (s.has_texture) { pl.tex = texture(r, &s.texture); pl.tw = s.texture.level_width[0]; pl.th = s.texture.level_height[0]; }
+    const sw_target *rt = s.has_texture ? target_for(r, s.texture.memory[0]) : NULL;
+    if (rt) { pl.tex = rt->color; pl.tw = rt->width; pl.th = rt->height; }   /* rendered to earlier: sample the target itself */
+    else if (s.has_texture) { pl.tex = texture(r, &s.texture); pl.tw = s.texture.level_width[0]; pl.th = s.texture.level_height[0]; }
     mh_d3d_vertex *v = NULL; size_t n = mh_d3d_assemble(r->mem, port, call, &v);
     if (r->log) fprintf(r->log, "draw kind=%d prim=%u tris=%u fvf=%03x tex=%s%ux%u fmt=%08x colorop=%u(%x,%x) alphaop=%u blend=%d(%u,%u) atest=%d z=%d/%d cull=%u\n",
                         call->kind, call->primitive, (unsigned)(n / 3), mh_port_fvf(port), s.has_texture ? "" : "none ", pl.tw, pl.th, s.has_texture ? s.texture.format : 0,
@@ -149,7 +176,7 @@ static void on_present(void *user, mh_port *port, unsigned frame) {
     mh_sw_renderer *r = user;
     if (!ensure(r, port)) return;
     if (r->log) fprintf(r->log, "present %u (%ux%u)\n", frame, r->width, r->height);
-    if (r->png[0]) { char path[600]; snprintf(path, sizeof path, r->png, frame); mh_write_png(path, r->color, r->width, r->height); }
+    if (r->png[0] && frame >= r->png_from) { char path[600]; snprintf(path, sizeof path, r->png, frame); mh_write_png(path, r->bcolor, r->bw, r->bh); }
 }
 
 /* ------------------------------------------------------------------ lifetime */
@@ -158,9 +185,15 @@ mh_sw_renderer *mh_sw_renderer_create(mh_guest_memory *memory, FILE *log, const 
     r->mem = memory; r->log = log; if (png_pattern) snprintf(r->png, sizeof r->png, "%s", png_pattern);
     return r;
 }
-void mh_sw_renderer_destroy(mh_sw_renderer *r) { if (!r) return; for (unsigned i = 0; i < r->ncache; i++) free(r->cache[i].rgba); free(r->color); free(r->depth); free(r); }
+void mh_sw_renderer_destroy(mh_sw_renderer *r) {
+    if (!r) return;
+    for (unsigned i = 0; i < r->ncache; i++) free(r->cache[i].rgba);
+    for (unsigned i = 0; i < r->ntargets; i++) { free(r->targets[i].color); free(r->targets[i].depth); }
+    free(r->bcolor); free(r->bdepth); free(r);
+}
+void mh_sw_renderer_set_first_frame(mh_sw_renderer *r, unsigned frame) { r->png_from = frame; }
 void mh_sw_renderer_bind(mh_sw_renderer *r, mh_port_renderer *out) { memset(out, 0, sizeof *out); out->user = r; out->clear = on_clear; out->draw = on_draw; out->present = on_present; }
-const uint8_t *mh_sw_renderer_frame(const mh_sw_renderer *r, uint32_t *w, uint32_t *h) { *w = r->width; *h = r->height; return r->color; }
+const uint8_t *mh_sw_renderer_frame(const mh_sw_renderer *r, uint32_t *w, uint32_t *h) { *w = r->bw; *h = r->bh; return r->bcolor; }
 
 /* ------------------------------------------------------------------ PNG */
 static uint32_t png_crc_table[256];

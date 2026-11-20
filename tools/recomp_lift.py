@@ -102,10 +102,27 @@ def switch_bound(read,address):
     from its guard: the last `cmp idx, N` followed by `ja` (N+1 entries) or `jae` (N entries)
     among the few instructions before it, with no later write to idx. None when absent."""
     decoder=Cs(CS_ARCH_X86,CS_MODE_32)
-    for back in range(0x30,0,-1):
+    # The guard may lie some way back (x87 code in between): try every decoding alignment that
+    # reaches the jump and keep the first that shows a valid guard.
+    found=set()
+    for back in range(0x40,0,-1):
         ins=list(decoder.disasm(read(address-back,back+8),address-back))
-        if any(i.address==address for i in ins):break
-    else:return None
+        if any(i.address==address for i in ins):
+            n=_switch_guard(ins,address)
+            k=next(j for j,i in enumerate(ins) if i.address==address)
+            low={'eax':'al','ebx':'bl','ecx':'cl','edx':'dl'}
+            r=ins[k].op_str[len('dword ptr ['):].split('*')[0] if ins[k].op_str.startswith('dword ptr [') else ''
+            if n is None and k>=2 and r in low and ins[k-2].mnemonic=='xor' and ins[k-2].op_str==f'{r}, {r}' and ins[k-1].mnemonic=='mov':
+                # two-level switch: a byte table indexed by i (bounded by its own guard) selects the entry
+                m=re.fullmatch(low[r]+r', byte ptr \[(e[a-z]{2}) \+ 0x([0-9a-f]+)\]',ins[k-1].op_str)
+                if m:
+                    inner=_switch_guard(ins[:k-2]+[_Fake(ins[k-2].address,'jmp',f'dword ptr [{m.group(1)}*4 + 0x0]')],ins[k-2].address)
+                    if inner:n=max(read(int(m.group(2),16),inner))+1
+            if n is not None:found.add(n)
+    return found.pop() if len(found)==1 else None   # every alignment that shows a guard must agree
+class _Fake:
+    def __init__(self,address,mnemonic,op_str):self.address,self.mnemonic,self.op_str=address,mnemonic,op_str
+def _switch_guard(ins,address):
     k=next(j for j,i in enumerate(ins) if i.address==address)
     jmp=ins[k];idx=jmp.op_str.split('[')[1].split('*')[0].strip()
     for j in range(k-1,max(k-8,0),-1):
@@ -120,6 +137,13 @@ def switch_bound(read,address):
             if ins[c].mnemonic=='test' and i.mnemonic=='ja' and ins[c].op_str==f'{idx}, {idx}':return 1   # test leaves CF=0: ja exits unless idx==0
             if ins[c].mnemonic!='cmp':return None
             cmp=ins[c];reg,_,imm=cmp.op_str.partition(', ')
+            if imm in ('eax','ebx','ecx','edx','esi','edi','ebp'):
+                # `mov r, N` shortly before (r not written in between): the bound is N
+                for b in range(c-1,max(c-6,-1),-1):
+                    w=ins[b]
+                    if w.op_str.split(',')[0].strip()!=imm or w.mnemonic in('push','cmp','test'):continue
+                    imm=w.op_str.partition(', ')[2] if w.mnemonic=='mov' else '';break
+                else:return None
             if reg!=idx or not imm.startswith(('0x','1','2','3','4','5','6','7','8','9')) or not imm.replace('0x','').isalnum():return None
             n=int(imm,0)+(1 if i.mnemonic=='ja' else 0)
             return n if 0<n<=1024 else None
@@ -157,6 +181,11 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
     if (PCRECOMP/'REVISION.txt').read_text(encoding='ascii').strip()!=REVISION:raise SystemExit('unexpected tool revision')
     if not re.fullmatch(r'[a-z0-9_]{1,40}',name):raise SystemExit('invalid unit name')
     pe=pefile.PE(data=data);base=pe.OPTIONAL_HEADER.ImageBase;decoder=Cs(CS_ARCH_X86,CS_MODE_32)
+    resume_sites={}
+    redirects_path=ROOT/'private/analysis/protection/redirects.json'
+    if dispatch_slots and redirects_path.exists():
+        for s in json.loads(redirects_path.read_text(encoding='utf-8'))['slot_sites']:
+            if s['kind']=='resume':resume_sites[int(s['return'],16)]=(int(s['value'],16),s['args'])
     names={}
     for entry in pe.DIRECTORY_ENTRY_IMPORT:
         for imp in entry.imports:names[imp.address]=imp.name.decode() if imp.name else f'ordinal_{imp.ordinal}'
@@ -231,6 +260,14 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
             if slot!=int(m.group(3),16) or (slot not in imports and slot not in dispatch_slots and (slot in names or not indirect)):raise SystemExit(f'indirect call through {slot:#x} at {site:#x} is not an allowed import')
             ins=list(decoder.disasm(pe.get_data(site-base,6),site,count=1))
             if len(ins)!=1 or ins[0].mnemonic!='call' or ins[0].size!=6 or ins[0].bytes[:2]!=b'\xff\x15':raise SystemExit(f'import call decoding mismatch at {site:#x}')
+            if slot in dispatch_slots and site+6 in resume_sites:
+                # protection "resume" site (tools/resolve_protection_redirects.py): the intact wrapper drops its
+                # stdcall arguments and continues at a label of this function, past the penalty code
+                target,args=resume_sites[site+6]
+                if not site<target<=site+0x40:raise SystemExit(f'resume target {target:#x} of {site:#x} out of range')
+                sites.append({'call':hex(site),'slot':hex(slot),'resume':hex(target),'args':args})
+                rewrites.append('protection resume')
+                return f'esp += {4*args}u; goto L_{target:08X}; /* protection: continue past the penalty */'
             if slot in dispatch_slots or slot not in names:  # a slot or a global function pointer: dispatched by its run-time value, exact return address
                 sites.append({'call':hex(site),'slot':hex(slot),'dispatch':True,'return':hex(site+6)})
                 return f'MH_RECOMP_ICALL_AT(MEM32(0x{slot:X}), 0x{site+6:08X}u);'
@@ -271,8 +308,8 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
             if len(ins)!=1 or ins[0].mnemonic!='jmp' or ins[0].bytes[0]!=0xff:raise SystemExit(f'indirect jump decoding mismatch at {site:#x}')
             sites.append({'jump':hex(site),'indirect':ins[0].op_str})
             return f'MH_RECOMP_IJMP_AT({expr}); return;'
-        source=re.sub(r'RECOMP_ITAIL\(([^;]*?)\); return; /\* 0x([0-9A-F]{8}): jmp [^*]*\*/',indirect_jump,source)
-        source=re.sub(r'RECOMP_ICALL\(([^;]*?)\); /\* 0x([0-9A-F]{8}): call [^*]*\*/',dynamic,source)
+        source=re.sub(r'RECOMP_ITAIL\(([^;]*?)\); return; /\* 0x([0-9A-F]{8}): jmp (?:(?!\*/).)*\*/',indirect_jump,source)   # operands may contain '*' (index*scale)
+        source=re.sub(r'RECOMP_ICALL\(([^;]*?)\); /\* 0x([0-9A-F]{8}): call (?:(?!\*/).)*\*/',dynamic,source)
         source=STOS.sub(stos,source)
         # Instructions PCRecomp leaves as an empty statement (`; /* UNIMPLEMENTED: ... */`), with
         # their bytes checked; anything else still unimplemented aborts below.

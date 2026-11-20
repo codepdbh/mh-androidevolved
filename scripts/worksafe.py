@@ -1393,7 +1393,7 @@ def build_game_library():
     out=ROOT/'private/analysis/game/android';out.mkdir(parents=True,exist_ok=True);lib=out/'libmh_game.so'
     built=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIC','-shared',
                     *[x for d in includes for x in ('-I',d)],str(ROOT/'android/app/src/main/cpp/game_jni.c'),'-o',str(lib),
-                    '-lGLESv3','-lEGL','-landroid','-llog','-lm','-Wl,-z,max-page-size=16384'],1800,'game-library-build',cfg,max_processes=4,memory_mb=6144)
+                    '-lGLESv3','-lEGL','-landroid','-llog','-laaudio','-lm','-Wl,-z,max-page-size=16384'],1800,'game-library-build',cfg,max_processes=4,memory_mb=6144)
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('game library build failed; inspect game-library-build logs')
     return {'library':str(lib),'sha256':hashlib.sha256(lib.read_bytes()).hexdigest(),'distribution':'private: contains translated game code'}
 
@@ -1459,7 +1459,7 @@ def build_diagnostic_apk():
             apk.writestr('assets/translated/'+asset,json.dumps({k:record[k] for k in ('binary_sha256','output_sha256')},indent=2)+'\n')
             translated=translated or {};translated[library]=True
         game=ROOT/'private/analysis/game/android/libmh_game.so'
-        if game.is_file() and game.stat().st_mtime>=max(p.stat().st_mtime for p in (ROOT/'android/app/src/main/cpp/game_jni.c',ROOT/'runtime/gles_renderer.c',ROOT/'runtime/game_runner.c',ROOT/'runtime/port_api.c',ROOT/'runtime/d3d_common.c')):
+        if game.is_file() and game.stat().st_mtime>=max(p.stat().st_mtime for p in (ROOT/'android/app/src/main/cpp/game_jni.c',ROOT/'runtime/gles_renderer.c',ROOT/'runtime/game_runner.c',ROOT/'runtime/port_api.c',ROOT/'runtime/d3d_common.c',ROOT/'runtime/audio_mixer.c')):
             apk.write(game,'lib/arm64-v8a/libmh_game.so');translated=translated or {};translated['libmh_game.so']=True
     aligned=out/'aligned.apk'; signed=out/'diagnostic-debug.apk'
     run([str(align),'-f','4',str(unsigned),str(aligned)],'diagnostic-zipalign')

@@ -21,6 +21,7 @@ int main(int argc,char **argv){
         static char pattern[600],logpath[600];
         snprintf(pattern,sizeof pattern,"%s/frame%%03u.png",getenv("MH_RENDER"));snprintf(logpath,sizeof logpath,"%s/draws.txt",getenv("MH_RENDER"));
         mh_sw_renderer *sw=mh_sw_renderer_create(&mh_recomp_region,fopen(logpath,"w"),pattern);mh_sw_renderer_bind(sw,&pr);c.renderer=&pr;
+        if(getenv("MH_RENDER_FROM"))mh_sw_renderer_set_first_frame(sw,(unsigned)strtoul(getenv("MH_RENDER_FROM"),NULL,10));
     }
     int rc=mh_game_run(&c);
     if(rc)return rc;

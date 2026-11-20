@@ -6,12 +6,21 @@
 #include <string.h>
 
 typedef struct { uint32_t memory, format, width, height, version; GLuint id; } gl_texture;
+/* A render target other than the back buffer (a texture level or a surface): its own framebuffer
+ * with a colour texture, used directly when the game samples that texture. */
+typedef struct { uint32_t memory, width, height; int fw, fh; GLuint tex, fbo, depth; } gl_target;
 struct mh_gles_renderer {
     mh_guest_memory *mem; void *user; void (*swap)(void *); void (*window_size)(void *, int *, int *);
-    uint32_t width, height; GLuint fbo, color, depth;
+    uint32_t width, height;                 /* the device's back buffer (Direct3D units) */
+    int fw, fh;                             /* the framebuffer: the back buffer at the internal resolution */
+    float scale; int stretch;               /* options (mh_gles_renderer_set_options) */
+    GLuint fbo, color, depth;
     GLuint program, vbo, vao;
     GLint u_tex, u_has_tex, u_color, u_alpha, u_tfactor, u_atest, u_afunc, u_aref;
     gl_texture textures[512]; unsigned ntextures;
+    gl_target targets[32]; unsigned ntargets;
+    uint32_t cw, ch; int cfw, cfh;          /* the current target: Direct3D size and framebuffer size */
+    GLint u_flip;
 };
 
 static const char *VERTEX =
@@ -24,7 +33,7 @@ static const char *FRAGMENT =
     "#version 300 es\nprecision highp float; precision highp int;\n"
     "in vec4 v_diffuse; in vec4 v_specular; in vec2 v_uv;\n"
     "uniform sampler2D u_tex; uniform int u_has_tex; uniform ivec3 u_color; uniform ivec3 u_alpha; uniform vec4 u_tfactor;\n"
-    "uniform int u_atest; uniform int u_afunc; uniform float u_aref;\n"
+    "uniform int u_atest; uniform int u_afunc; uniform float u_aref; uniform int u_flip;\n"
     "out vec4 o;\n"
     "vec4 sel(int a, vec4 tex){ int s=a&15; vec4 r = s==2?tex : s==3?u_tfactor : s==4?v_specular : v_diffuse;\n"
     "  if((a&0x20)!=0) r=vec4(r.a); if((a&0x10)!=0) r=vec4(1.0)-r; return r; }\n"
@@ -33,7 +42,7 @@ static const char *FRAGMENT =
     "bool cmpf(int f,float a,float b){ if(f==1) return false; if(f==2) return a<b; if(f==3) return a==b; if(f==4) return a<=b;\n"
     "  if(f==5) return a>b; if(f==6) return a!=b; if(f==7) return a>=b; return true; }\n"
     "void main(){\n"
-    "  vec4 tex = u_has_tex!=0 ? texture(u_tex, v_uv) : vec4(1.0);\n"
+    "  vec4 tex = u_has_tex!=0 ? texture(u_tex, u_flip!=0 ? vec2(v_uv.x, 1.0-v_uv.y) : v_uv) : vec4(1.0);\n"
     "  int cop = u_color.x; if(u_has_tex==0 && cop!=1 && (u_color.y&15)==2) cop=3;\n"
     "  vec4 c1=sel(u_color.y,tex), c2=sel(u_color.z,tex);\n"
     "  vec3 rgb=vec3(comb(cop,c1.r,c2.r,v_diffuse.r), comb(cop,c1.g,c2.g,v_diffuse.g), comb(cop,c1.b,c2.b,v_diffuse.b));\n"
@@ -57,6 +66,7 @@ static int init_gl(mh_gles_renderer *r) {
     r->u_color = glGetUniformLocation(r->program, "u_color"); r->u_alpha = glGetUniformLocation(r->program, "u_alpha");
     r->u_tfactor = glGetUniformLocation(r->program, "u_tfactor"); r->u_atest = glGetUniformLocation(r->program, "u_atest");
     r->u_afunc = glGetUniformLocation(r->program, "u_afunc"); r->u_aref = glGetUniformLocation(r->program, "u_aref");
+    r->u_flip = glGetUniformLocation(r->program, "u_flip");
     glGenVertexArrays(1, &r->vao); glGenBuffers(1, &r->vbo);
     glBindVertexArray(r->vao); glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
     const GLsizei stride = 14 * sizeof(float);
@@ -70,19 +80,61 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
     uint32_t w, h;
     if (!mh_port_device_size(port, &w, &h) || !w || !h) return 0;
     if (!r->program && !init_gl(r)) return 0;
-    if (w != r->width || h != r->height) {
+    /* Internal resolution: the back buffer scaled by `scale`, or (scale 0) to the window: its
+     * height with the aspect kept, or the whole window when stretched. Geometry arrives in Direct3D
+     * screen units and is mapped to clip space, so only the framebuffer size changes. */
+    int fw, fh;
+    if (r->scale > 0) { fw = (int)(w * r->scale + 0.5f); fh = (int)(h * r->scale + 0.5f); }
+    else {
+        int ww = 0, wh = 0; r->window_size(r->user, &ww, &wh); if (ww < 1 || wh < 1) { ww = (int)w; wh = (int)h; }
+        if (r->stretch) { fw = ww; fh = wh; }
+        else { float s = (float)ww / w < (float)wh / h ? (float)ww / w : (float)wh / h; fw = (int)(w * s + 0.5f); fh = (int)(h * s + 0.5f); }
+    }
+    if (fw > 4096) fw = 4096; if (fh > 4096) fh = 4096; if (fw < 1) fw = 1; if (fh < 1) fh = 1;
+    if (w != r->width || h != r->height || fw != r->fw || fh != r->fh) {
         if (r->fbo) { glDeleteFramebuffers(1, &r->fbo); glDeleteRenderbuffers(1, &r->color); glDeleteRenderbuffers(1, &r->depth); }
         glGenFramebuffers(1, &r->fbo); glGenRenderbuffers(1, &r->color); glGenRenderbuffers(1, &r->depth);
-        glBindRenderbuffer(GL_RENDERBUFFER, r->color); glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, (GLsizei)w, (GLsizei)h);
-        glBindRenderbuffer(GL_RENDERBUFFER, r->depth); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, (GLsizei)w, (GLsizei)h);
+        glBindRenderbuffer(GL_RENDERBUFFER, r->color); glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, fw, fh);
+        glBindRenderbuffer(GL_RENDERBUFFER, r->depth); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, fw, fh);
         glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, r->color);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, r->depth);
-        r->width = w; r->height = h;
+        r->width = w; r->height = h; r->fw = fw; r->fh = fh;
         glClearColor(0, 0, 0, 1); glClearDepthf(1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo); glViewport(0, 0, (GLsizei)w, (GLsizei)h);
+    /* the current render target: the back buffer, or a texture/surface with its own framebuffer
+     * (rendered at the same internal scale; rows bottom-up, so it is sampled flipped) */
+    uint32_t mem = 0, tw = 0, th = 0, tf = 0;
+    if (mh_port_render_target(port, &mem, &tw, &th, &tf) && tw && th) {
+        gl_target *t = NULL;
+        for (unsigned i = 0; i < r->ntargets; i++) if (r->targets[i].memory == mem && r->targets[i].width == tw && r->targets[i].height == th) t = &r->targets[i];
+        if (!t) {
+            if (r->ntargets == 32) { glDeleteTextures(1, &r->targets[0].tex); glDeleteFramebuffers(1, &r->targets[0].fbo); glDeleteRenderbuffers(1, &r->targets[0].depth);
+                                     memmove(r->targets, r->targets + 1, 31 * sizeof *r->targets); r->ntargets--; }
+            t = &r->targets[r->ntargets++]; memset(t, 0, sizeof *t);
+            t->memory = mem; t->width = tw; t->height = th;
+            t->fw = (int)(tw * (float)r->fw / w + 0.5f); t->fh = (int)(th * (float)r->fh / h + 0.5f);
+            if (t->fw < 1) t->fw = 1; if (t->fh < 1) t->fh = 1; if (t->fw > 4096) t->fw = 4096; if (t->fh > 4096) t->fh = 4096;
+            glGenTextures(1, &t->tex); glBindTexture(GL_TEXTURE_2D, t->tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->fw, t->fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glGenRenderbuffers(1, &t->depth); glBindRenderbuffer(GL_RENDERBUFFER, t->depth); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, t->fw, t->fh);
+            glGenFramebuffers(1, &t->fbo); glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->tex, 0);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t->depth);
+            glClearColor(0, 0, 0, 0); glClearDepthf(1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, t->fbo); glViewport(0, 0, t->fw, t->fh);
+        r->cw = tw; r->ch = th; r->cfw = t->fw; r->cfh = t->fh;
+        return 1;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo); glViewport(0, 0, r->fw, r->fh);
+    r->cw = w; r->ch = h; r->cfw = r->fw; r->cfh = r->fh;
     return 1;
+}
+static const gl_target *target_for(const mh_gles_renderer *r, uint32_t memory) {
+    if (!memory) return NULL;
+    for (unsigned i = 0; i < r->ntargets; i++) if (r->targets[i].memory == memory) return &r->targets[i];
+    return NULL;
 }
 static GLuint texture(mh_gles_renderer *r, const mh_port_texture_info *t) {
     gl_texture *e = NULL;
@@ -129,7 +181,9 @@ static void on_clear(void *user, mh_port *port, uint32_t count, uint32_t rects, 
         uint32_t q[4]; if (!mh_mem_read(r->mem, rects + 16 * i, q, 16)) continue;
         int32_t x0 = (int32_t)q[0], y0 = (int32_t)q[1], x1 = (int32_t)q[2], y1 = (int32_t)q[3];
         /* Direct3D rectangles are top-down; the framebuffer rows are flipped (row 0 at the top in NDC). */
-        glScissor(x0, (GLint)r->height - y1, x1 - x0, y1 - y0); glClear(mask);
+        float sx = (float)r->cfw / r->cw, sy = (float)r->cfh / r->ch;
+        GLint left = (GLint)(x0 * sx + 0.5f), right = (GLint)(x1 * sx + 0.5f), top = (GLint)(y0 * sy + 0.5f), bottom = (GLint)(y1 * sy + 0.5f);
+        glScissor(left, r->cfh - bottom, right - left, bottom - top); glClear(mask);
     }
     glDisable(GL_SCISSOR_TEST);
 }
@@ -147,8 +201,8 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
         if (area == 0 || (s.cull == 2 && area > 0) || (s.cull == 3 && area < 0)) continue;   /* as the reference renderer */
         for (int k = 0; k < 3; k++) {
             const mh_d3d_vertex *p = &v[i + (size_t)k]; float w = p->rhw != 0 ? 1.0f / p->rhw : 1.0f, *o = buf + 14 * out++;
-            o[0] = ((p->x + 0.5f) / (float)r->width * 2.0f - 1.0f) * w;    /* Direct3D pixel centres are at integers */
-            o[1] = (1.0f - (p->y + 0.5f) / (float)r->height * 2.0f) * w;
+            o[0] = ((p->x + 0.5f) / (float)r->cw * 2.0f - 1.0f) * w;    /* Direct3D pixel centres are at integers */
+            o[1] = (1.0f - (p->y + 0.5f) / (float)r->ch * 2.0f) * w;
             o[2] = (p->z * 2.0f - 1.0f) * w; o[3] = w;
             memcpy(o + 4, p->diffuse, 16); memcpy(o + 8, p->specular, 16); o[12] = p->u; o[13] = p->v;
         }
@@ -159,8 +213,10 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(out * 14 * sizeof(float)), buf, GL_STREAM_DRAW);
     free(buf);
     glActiveTexture(GL_TEXTURE0);
+    const gl_target *rt = s.has_texture ? target_for(r, s.texture.memory[0]) : NULL;
+    glUniform1i(r->u_flip, rt != NULL);
     if (s.has_texture) {
-        glBindTexture(GL_TEXTURE_2D, texture(r, &s.texture));
+        glBindTexture(GL_TEXTURE_2D, rt ? rt->tex : texture(r, &s.texture));
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s.mag_filter == 1 ? GL_NEAREST : GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, s.min_filter == 1 ? GL_NEAREST : GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(s.address_u)); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(s.address_v));
@@ -187,18 +243,18 @@ static void on_present(void *user, mh_port *port, unsigned frame) {
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
     glViewport(0, 0, ww, wh); glDisable(GL_SCISSOR_TEST); glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
-    /* fit the back buffer to the window, aspect ratio kept */
-    int dw = ww, dh = (int)((long)ww * r->height / r->width);
-    if (dh > wh) { dh = wh; dw = (int)((long)wh * r->width / r->height); }
+    /* fit the back buffer to the window: aspect ratio kept (bars), or stretched over the whole window */
+    int dw = ww, dh = wh;
+    if (!r->stretch) { dh = (int)((long)ww * r->height / r->width); if (dh > wh) { dh = wh; dw = (int)((long)wh * r->width / r->height); } }
     int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
-    glBlitFramebuffer(0, 0, (GLint)r->width, (GLint)r->height, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBlitFramebuffer(0, 0, r->fw, r->fh, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, r->fw == dw && r->fh == dh ? GL_NEAREST : GL_LINEAR);
     r->swap(r->user);
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
 }
 
 mh_gles_renderer *mh_gles_renderer_create(mh_guest_memory *memory, void *user, void (*swap)(void *), void (*window_size)(void *, int *, int *)) {
     mh_gles_renderer *r = calloc(1, sizeof *r); if (!r) return NULL;
-    r->mem = memory; r->user = user; r->swap = swap; r->window_size = window_size;
+    r->mem = memory; r->user = user; r->swap = swap; r->window_size = window_size; r->scale = 1;
     return r;
 }
 void mh_gles_renderer_destroy(mh_gles_renderer *r) {
@@ -208,4 +264,5 @@ void mh_gles_renderer_destroy(mh_gles_renderer *r) {
     if (r->program) { glDeleteProgram(r->program); glDeleteBuffers(1, &r->vbo); glDeleteVertexArrays(1, &r->vao); }
     free(r);
 }
+void mh_gles_renderer_set_options(mh_gles_renderer *r, float scale, int stretch) { r->scale = scale < 0 ? 0 : scale > 6 ? 6 : scale; r->stretch = stretch != 0; }
 void mh_gles_renderer_bind(mh_gles_renderer *r, mh_port_renderer *out) { memset(out, 0, sizeof *out); out->user = r; out->clear = on_clear; out->draw = on_draw; out->present = on_present; }

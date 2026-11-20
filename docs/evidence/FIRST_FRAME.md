@@ -46,3 +46,48 @@ El fotograma 3 es el primero del vídeo de introducción (Bink) y sale negro has
 - **Escenarios.** `MH_SCENARIO=<nombre>` escribe la traza y la referencia en `winmain/scenarios/<nombre>/`. `tools/lift_winmain.py` traduce la unión de todos los escenarios, y `test_winmain` compara cada uno en Windows y en el S25. Hay trazas del menú en los cuatro idiomas además del inglés, hasta el fotograma 300.
 - **Teclado de los menús.** El menú no lee el teclado por DirectInput: lo recibe en `WM_KEYDOWN`/`WM_CHAR`. En cada `Present`, la referencia y el port encolan los cambios del estado de teclado (guion y teclas en vivo de la app) como mensajes para la ventana con foco.
 - **Prueba.** En el S25, la app con «Español» muestra el **MENÚ PRINCIPAL en español** (`private/evidence/s25_menu_es.png`).
+
+## Controles táctiles, resolución y navegación del menú — 2026-11-18
+
+- **Resolución interna** (`mh_gles_renderer_set_options`): el framebuffer se dibuja a 1×, 2× o 3× los 640×480 del juego, o a la resolución de la pantalla. Opción de estirar a toda la pantalla. Solo afecta a la presentación: el juego y su estado Direct3D no cambian.
+- **Controles táctiles** (`TouchControls.java`, multitáctil): cruceta, OK (Enter), Atrás (Esc) y pausa (Esc). En el resto de la pantalla, arrastrar mueve el ratón del juego (`mh_port_mouse_move`, `lX`/`lY` de DirectInput) y tocar hace clic. Opciones en el lanzador: resolución, estirar y mostrar los controles.
+- **Teclado en los menús.** El procedimiento de ventana (0x4c01e0) convierte `WM_KEYDOWN`/`WM_KEYUP` (0x4c2a00) en eventos de teclado de RenderWare (0x1c/0x1d).
+- **Pruebas.** Flecha abajo + Enter → **selección de escenas**; Enter sobre JUGAR → **pantalla de brillo**. El traductor acepta ahora llamadas indirectas con índice escalado (`call [ebx*8+...]`). Unidad: 1650 funciones. Siete escenarios (inglés, los cuatro idiomas y las dos pruebas) idénticos a x86 en Windows y en el S25.
+- **En el S25**, con los botones táctiles: ▼ y OK → «SELECCIÓN DE ESCENAS», con «RENACIDO» (`private/evidence/s25_scene_select.png`).
+
+## Sonido y ritmo — 2026-11-18 (implementación; prueba de escucha pendiente)
+
+- **Notificaciones de audio** (`mh_port_set_audio`, `mh_port_sound`). Cada inicio, parada, reanudación, fin, liberación o cambio (volumen, ritmo, bucles) de un sample 3D de Miles se notifica con su estado completo. Solo es salida: lo que observa el juego (estado, posiciones) sigue en el reloj virtual, y la comparación con x86 no cambia.
+- **Mezclador** (`runtime/audio_mixer.c`): estéreo de 16 bits a 48 kHz.
+  - Lee el PCM de 8 o 16 bits en su sitio, porque la música en streaming se rellena mientras suena en bucle.
+  - El IMA ADPCM lo decodifica al iniciar el sample.
+  - Respeta el ritmo propio o el de reproducción, el volumen, el número de bucles y el bloque de bucle.
+  - En la app se reproduce con AAudio (`-laaudio`).
+- **Ritmo.** La app sigue el reloj virtual del juego (`pace()` en cada `Present`), de modo que el tiempo real avanza igual que el del juego y la imagen y el sonido van a la par.
+- **Navegación del menú:** trazas `probe_c` (Configuración, abajo y Atrás), `probe_d` (brillo con ◀▶, Cancelar y arriba) y `probe_e` (escenas con ▶◀, abajo y Atrás). `play` llega a la **dificultad** (FETISH/HARDCORE).
+
+## El primer nivel como código traducido — 2026-11-20
+
+- **Camino.** JUGAR → brillo (OK) → dificultad (FETISH) → guardar partida (Esc: continuar sin guardar) → cinemática del nivel (se salta con un clic) → **nivel 1**. Tras ~1500 fotogramas se ve a Cash en la calle con el tutorial (`private/evidence/ingame_lit_frame1499.png`).
+- **Protección.** Los 16 controles del envoltorio están resueltos (`tools/resolve_protection_redirects.py`), con la respuesta de una copia intacta:
+  - **integrity:** el juego exige un valor en `eax`;
+  - **resume:** el traductor salta a la etiqueta de `esi` en lugar de ejecutar la penalización;
+  - **mirror:** devuelve B y, si M es un puntero, lo escribe en `*M`;
+  - **store:** `[ebx] = ecx`;
+  - **bounded:** devuelve 0 y saca (4, búfer).
+- **Traductor.**
+  - `switch` con guarda lejana (código x87 en medio, todas las alineaciones deben coincidir), con el límite en un registro (`mov r, N; cmp i, r`) y de dos niveles (tabla de bytes).
+  - Llamadas indirectas con índice escalado.
+  - 4664 funciones, 348 128 instrucciones.
+- **Memoria.** El invitado ocupa ahora 512 MB, todo el rango de recursos Direct3D.
+- **Gráficos.**
+  - Iluminación de función fija en el montaje de vértices (`mh_port_lights`, `mh_port_material`; direccional y puntual con atenuación; fuentes de color del material).
+  - Superficies de render (`mh_port_render_target`): un framebuffer por textura en GLES, buffers propios en el rasterizador de referencia, y muestreo directo cuando el juego usa esa textura.
+- **Referencia x86 corregida.** Unicorn (QEMU antiguo) no ejecuta `fyl2x`/`fyl2xp1` fuera de dominio: deja la pila igual. El x87 real produce NaN o ±∞ y saca el operando. El trazador lo intercepta (ST0 = 2.0, ST1 = resultado) y coincide con el hardware y con el port. Esa era la divergencia del montículo global (12 palabras con `0x80000000`).
+- **Controles por defecto del juego** (pantalla REMAP CONTROLS):
+  - movimiento: ↑↓←→ / WASD;
+  - correr: Shift; sigilo: Ctrl izq.; mirar atrás: F; asomarse: Q/E; primera persona: X;
+  - acción: ratón izq.; acción 2: ratón der.; recargar: R; usar: Enter/Espacio; inventario: Tab/ratón central/rueda; pausa: Esc.
+  - La referencia y el port entregan estas teclas como `WM_KEYDOWN`/`WM_CHAR`.
+  - La app tiene una palanca virtual (flechas), arrastre de cámara (ratón) y botones Atacar, Fijar, Usar, Correr, Sigilo (fijo), Mirar, Inventario, Recargar, OK y Atrás.
+- **Pruebas.** 15 escenarios idénticos a x86 en Windows x64, nivel incluido. Pendiente: el S25, que se desconectó.

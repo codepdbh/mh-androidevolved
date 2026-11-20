@@ -19,5 +19,9 @@ typedef struct mh_gles_renderer mh_gles_renderer;
 mh_gles_renderer *mh_gles_renderer_create(mh_guest_memory *memory, void *user,
                                           void (*swap)(void *user), void (*window_size)(void *user, int *width, int *height));
 void mh_gles_renderer_destroy(mh_gles_renderer *r);
+/* Internal resolution: `scale` times the back buffer (1 = the game's own resolution), or 0 for the
+ * window's resolution; `stretch` fills the whole window instead of keeping the 4:3 picture with bars.
+ * Presentation only: the game and its Direct3D state are unchanged. */
+void mh_gles_renderer_set_options(mh_gles_renderer *r, float scale, int stretch);
 void mh_gles_renderer_bind(mh_gles_renderer *r, mh_port_renderer *out);
 #endif

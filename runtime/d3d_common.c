@@ -76,13 +76,15 @@ uint8_t *mh_d3d_decode_texture(mh_guest_memory *memory, const mh_port_texture_in
 }
 
 /* ------------------------------------------------------------------ vertices */
-typedef struct { uint32_t stride, off_diffuse, off_specular, off_tex0; int transformed, has_diffuse, has_specular, ntex; } d3d_layout;
+typedef struct { uint32_t stride, off_normal, off_diffuse, off_specular, off_tex0; int transformed, has_normal, has_diffuse, has_specular, ntex; } d3d_layout;
+/* Fixed-function lighting (D3DRS_LIGHTING), evaluated in world space per vertex. */
+typedef struct { int on; unsigned n; float light[8][26]; float mat[17]; float ambient[4]; uint32_t diffuse_src, ambient_src, emissive_src; int color_vertex; float world[16]; } d3d_lighting;
 static d3d_layout d3d_fvf_layout(uint32_t fvf, uint32_t stride) {
     d3d_layout L; memset(&L, 0, sizeof L); L.stride = stride;
     uint32_t pos = fvf & 0x00e, off;
     L.transformed = pos == 0x004;
     off = pos == 0x002 ? 12 : pos == 0x004 ? 16 : pos >= 0x006 ? 12 + 4 * ((pos - 0x004) / 2) : 0;
-    if (fvf & 0x010) off += 12;
+    if (fvf & 0x010) { L.has_normal = 1; L.off_normal = off; off += 12; }
     if (fvf & 0x020) off += 4;
     if (fvf & 0x040) { L.has_diffuse = 1; L.off_diffuse = off; off += 4; }
     if (fvf & 0x080) { L.has_specular = 1; L.off_specular = off; off += 4; }
@@ -91,6 +93,37 @@ static d3d_layout d3d_fvf_layout(uint32_t fvf, uint32_t stride) {
 }
 static void d3d_color4(uint32_t c, float o[4]) { o[0] = ((c >> 16) & 255) / 255.0f; o[1] = ((c >> 8) & 255) / 255.0f; o[2] = (c & 255) / 255.0f; o[3] = (c >> 24) / 255.0f; }
 static void d3d_mul(const float *v, const float *m, float *o) { for (int j = 0; j < 4; j++) o[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j]; }
+static void d3d_light_vertex(const d3d_lighting *lt, const float *pos, const float *normal, const float vcol[4], const float vspec[4], int has_vcol, float out[4]) {
+    /* material colours, or the vertex's colour (D3DMCS_COLOR1 = 1) with D3DRS_COLORVERTEX */
+    const float *md = lt->mat, *ma = lt->mat + 4, *me = lt->mat + 12;
+    float cd[4], ca[4], ce[4];
+    for (int i = 0; i < 4; i++) {
+        cd[i] = lt->color_vertex && has_vcol && lt->diffuse_src == 1 ? vcol[i] : lt->color_vertex && lt->diffuse_src == 2 ? vspec[i] : md[i];
+        ca[i] = lt->color_vertex && has_vcol && lt->ambient_src == 1 ? vcol[i] : lt->color_vertex && lt->ambient_src == 2 ? vspec[i] : ma[i];
+        ce[i] = lt->color_vertex && has_vcol && lt->emissive_src == 1 ? vcol[i] : lt->color_vertex && lt->emissive_src == 2 ? vspec[i] : me[i];
+    }
+    float p[4] = {pos[0], pos[1], pos[2], 1}, wp[4], n[4] = {normal[0], normal[1], normal[2], 0}, wn[4];
+    d3d_mul(p, lt->world, wp); d3d_mul(n, lt->world, wn);
+    float nl = sqrtf(wn[0] * wn[0] + wn[1] * wn[1] + wn[2] * wn[2]); if (nl > 0) { wn[0] /= nl; wn[1] /= nl; wn[2] /= nl; }
+    float r = ce[0] + lt->ambient[0] * ca[0], g = ce[1] + lt->ambient[1] * ca[1], b = ce[2] + lt->ambient[2] * ca[2];
+    for (unsigned i = 0; i < lt->n; i++) {
+        const float *l = lt->light[i]; int type = (int)d3d_ru((const uint8_t *)&l[0]);
+        float dir[3], att = 1;
+        if (type == 3) { dir[0] = -l[16]; dir[1] = -l[17]; dir[2] = -l[18]; }   /* directional: towards the light */
+        else {
+            dir[0] = l[13] - wp[0]; dir[1] = l[14] - wp[1]; dir[2] = l[15] - wp[2];
+            float d = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+            if (l[19] > 0 && d > l[19]) continue;   /* out of range */
+            float den = l[21] + l[22] * d + l[23] * d * d; att = den > 0 ? 1 / den : 1;
+            if (d > 0) { dir[0] /= d; dir[1] /= d; dir[2] /= d; }
+        }
+        float dl = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]); if (dl > 0) { dir[0] /= dl; dir[1] /= dl; dir[2] /= dl; }
+        float k = wn[0] * dir[0] + wn[1] * dir[1] + wn[2] * dir[2]; if (k < 0) k = 0;
+        r += att * (l[9] * ca[0] + l[1] * cd[0] * k); g += att * (l[10] * ca[1] + l[2] * cd[1] * k); b += att * (l[11] * ca[2] + l[3] * cd[2] * k);
+    }
+    out[0] = r > 1 ? 1 : r; out[1] = g > 1 ? 1 : g; out[2] = b > 1 ? 1 : b; out[3] = cd[3] > 1 ? 1 : cd[3] < 0 ? 0 : cd[3];
+}
+static const d3d_lighting *d3d_current_lighting;
 static int d3d_fetch(mh_guest_memory *mem, const d3d_layout *L, uint32_t base, uint32_t index, const float *wvp, const uint32_t *vp, mh_d3d_vertex *o) {
     memset(o, 0, sizeof *o);
     const uint8_t *p = mh_mem_span(mem, base + index * L->stride, L->stride ? L->stride : 16);
@@ -106,6 +139,13 @@ static int d3d_fetch(mh_guest_memory *mem, const d3d_layout *L, uint32_t base, u
     if (L->has_diffuse) d3d_color4(d3d_ru(p + L->off_diffuse), o->diffuse); else o->diffuse[0] = o->diffuse[1] = o->diffuse[2] = o->diffuse[3] = 1.0f;
     if (L->has_specular) d3d_color4(d3d_ru(p + L->off_specular), o->specular);
     if (L->ntex) { o->u = d3d_rf(p + L->off_tex0); o->v = d3d_rf(p + L->off_tex0 + 4); }
+    const d3d_lighting *lt = d3d_current_lighting;
+    if (lt && lt->on && !L->transformed) {
+        float pos[3] = {d3d_rf(p), d3d_rf(p + 4), d3d_rf(p + 8)}, nrm[3] = {0, 0, 0}, vcol[4];
+        if (L->has_normal) { nrm[0] = d3d_rf(p + L->off_normal); nrm[1] = d3d_rf(p + L->off_normal + 4); nrm[2] = d3d_rf(p + L->off_normal + 8); }
+        memcpy(vcol, o->diffuse, sizeof vcol);
+        d3d_light_vertex(lt, pos, nrm, vcol, o->specular, L->has_diffuse, o->diffuse);
+    }
     return 1;
 }
 size_t mh_d3d_assemble(mh_guest_memory *mem, mh_port *port, const mh_port_draw_call *call, mh_d3d_vertex **out) {
@@ -124,6 +164,16 @@ size_t mh_d3d_assemble(mh_guest_memory *mem, mh_port *port, const mh_port_draw_c
     mh_port_transform(port, 256, world); mh_port_transform(port, 2, view); mh_port_transform(port, 3, proj); mh_port_viewport(port, vp);
     for (int i = 0; i < 4; i++) d3d_mul(world + 4 * i, view, wv + 4 * i);
     for (int i = 0; i < 4; i++) d3d_mul(wv + 4 * i, proj, wvp + 4 * i);
+    d3d_lighting lt; memset(&lt, 0, sizeof lt);
+    lt.on = mh_port_render_state(port, 137) != 0 && !L.transformed;   /* D3DRS_LIGHTING */
+    if (lt.on) {
+        uint32_t raw[8][26], m[17]; lt.n = mh_port_lights(port, raw, 8); mh_port_material(port, m);
+        memcpy(lt.light, raw, sizeof raw); memcpy(lt.mat, m, sizeof m); memcpy(lt.world, world, sizeof world);
+        d3d_color4(mh_port_render_state(port, 139), lt.ambient);   /* D3DRS_AMBIENT */
+        lt.color_vertex = mh_port_render_state(port, 141) != 0;
+        lt.diffuse_src = mh_port_render_state(port, 145); lt.ambient_src = mh_port_render_state(port, 147); lt.emissive_src = mh_port_render_state(port, 148);
+    }
+    d3d_current_lighting = &lt;
     mh_d3d_vertex *v = malloc(sizeof *v * 3 * (size_t)count);
     if (!v) return 0;
     size_t n = 0;
@@ -144,7 +194,7 @@ size_t mh_d3d_assemble(mh_guest_memory *mem, mh_port *port, const mh_port_draw_c
         }
         if (ok) n += 3;
     }
-    (void)length; (void)ilen;
+    (void)length; (void)ilen; d3d_current_lighting = NULL;
     *out = v; return n;
 }
 

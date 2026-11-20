@@ -33,7 +33,7 @@ uint32_t g_icall_trace[ICALL_TRACE_SIZE],g_icall_from[ICALL_TRACE_SIZE],g_icall_
 mh_guest_memory mh_recomp_region;
 double g_st[8];int g_fp_top;uint16_t g_fpu_cw=0x027f;   /* a Windows process starts with 53-bit precision, exceptions masked */
 uint32_t g_mxcsr=0x1f80;                               /* SSE control: the processor default (all exceptions masked, round to nearest) */
-#define GUEST_SIZE 0x11000000u      /* up to the Direct3D resource memory in use (0x10000000 + 16 MiB) */
+#define GUEST_SIZE 0x20000000u      /* the whole Direct3D resource range (0x10000000-0x20000000); pages are committed on use */
 #define STACK_TOP 0x1800000u
 #define RETURN_SENTINEL 0x1f00000u
 #define API_BASE 0x1e00000u
@@ -42,7 +42,7 @@ uint32_t g_mxcsr=0x1f80;                               /* SSE control: the proce
 static uint8_t *guest;
 static mh_port *port;
 static uint32_t prus_target,pending_va;
-static unsigned redirects[2];
+static unsigned redirects[3];
 static jmp_buf frames_done;
 static mh_game_config cfg;
 /* Unrecoverable guest state: the embedder's handler (it must not return), else the process ends. */
@@ -139,6 +139,12 @@ static void prus_slot(void){
     switch(site->kind){
     case MH_REDIRECT_GET_LAST_ERROR:redirects[0]++;g_eax=*mh_port_last_error(port);g_esp+=4;break;
     case MH_REDIRECT_VALIDATE_POINTER:redirects[1]++;g_eax=mh_redirect_validate_pointer(&mh_recomp_region,MEM32(g_esp+4),MEM32(g_esp+8));g_esp+=12;break;
+    case MH_REDIRECT_INTEGRITY:redirects[2]++;g_eax=site->value;g_esp+=4+4u*site->args;break;   /* the answer of an intact copy */
+    case MH_REDIRECT_MIRROR:{unsigned h=site->args&0x7fu;redirects[2]++;
+        if(site->args&0x80u)MEM32(MEM32(g_esp+4+4*h+4))=site->value;   /* stack: ret, header, A, M, B */
+        g_eax=site->value;g_esp+=4+4*h;break;}
+    case MH_REDIRECT_STORE:redirects[2]++;MEM32(g_ebx)=g_ecx;g_eax=g_ecx;g_esp+=4;break;
+    /* MH_REDIRECT_RESUME sites are rewritten by the lifter (a jump within the caller) and never get here */
     default:unsupported("protection trigger site reached");
     }
 }

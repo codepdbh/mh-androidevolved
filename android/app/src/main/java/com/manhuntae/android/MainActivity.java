@@ -67,7 +67,9 @@ public final class MainActivity extends Activity {
         Button play = new Button(this);
         if (GameActivity.bundled(this)) {
             play.setText("Jugar (intro y menú principal; lee " + GameActivity.GAME_DIR + ")");
-            play.setOnClickListener(v -> startActivity(new Intent(this, GameActivity.class).putExtra(GameActivity.EXTRA_LANGID, selectedLanguage())));
+            play.setOnClickListener(v -> startActivity(new Intent(this, GameActivity.class).putExtra(GameActivity.EXTRA_LANGID, selectedLanguage())
+                .putExtra(GameActivity.EXTRA_SCALE, SCALES[preferences.getInt("scale", 0)]).putExtra(GameActivity.EXTRA_STRETCH, preferences.getBoolean("stretch", false))
+                .putExtra(GameActivity.EXTRA_CONTROLS, preferences.getBoolean("controls", true))));
         } else { play.setText("Jugar · aún no disponible"); play.setEnabled(false); }
         layout.addView(play);
         layout.addView(text("Idioma del juego", 16, Color.WHITE));
@@ -81,6 +83,26 @@ public final class MainActivity extends Activity {
         languages.check(1000 + languageIndex(selectedLanguage()));
         languages.setOnCheckedChangeListener((group, id) -> preferences.edit().putInt("langid", GameActivity.LANGUAGES[id - 1000]).apply());
         layout.addView(languages);
+        layout.addView(text("Resolución interna", 16, Color.WHITE));
+        android.widget.RadioGroup scales = new android.widget.RadioGroup(this);
+        scales.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < SCALE_NAMES.length; i++) {
+            android.widget.RadioButton option = new android.widget.RadioButton(this);
+            option.setText(SCALE_NAMES[i]); option.setTextColor(Color.LTGRAY); option.setId(2000 + i); scales.addView(option);
+        }
+        scales.check(2000 + Math.min(preferences.getInt("scale", 0), SCALE_NAMES.length - 1));
+        scales.setOnCheckedChangeListener((group, id) -> preferences.edit().putInt("scale", id - 2000).apply());
+        layout.addView(scales);
+        android.widget.CheckBox stretch = new android.widget.CheckBox(this);
+        stretch.setText("Estirar a toda la pantalla (sin bandas negras)"); stretch.setTextColor(Color.LTGRAY);
+        stretch.setChecked(preferences.getBoolean("stretch", false));
+        stretch.setOnCheckedChangeListener((b, on) -> preferences.edit().putBoolean("stretch", on).apply());
+        layout.addView(stretch);
+        android.widget.CheckBox controls = new android.widget.CheckBox(this);
+        controls.setText("Controles táctiles en pantalla"); controls.setTextColor(Color.LTGRAY);
+        controls.setChecked(preferences.getBoolean("controls", true));
+        controls.setOnCheckedChangeListener((b, on) -> preferences.edit().putBoolean("controls", on).apply());
+        layout.addView(controls);
         layout.addView(text("Código traducido del juego", 20, Color.WHITE));
         translatedStatus = text("Ejecuta en un proceso aislado la candidata de tiempo traducida con datos sintéticos y compara el resultado con el validado frente a x86. No arranca el juego.", 14, Color.LTGRAY);
         layout.addView(translatedStatus);
@@ -102,6 +124,9 @@ public final class MainActivity extends Activity {
         layout.addView(text("El usuario debe aportar sus propios archivos. Esta aplicación no incluye contenido comercial.", 14, Color.LTGRAY));
     }
 
+    /** Internal resolution choices: the screen's (default), or a multiple of the game's 640x480. */
+    private static final String[] SCALE_NAMES = {"Pantalla", "640×480", "1280×960", "1920×1440"};
+    private static final float[] SCALES = {0f, 1f, 2f, 3f};
     /** The chosen language; by default the phone's, if the game has it, else English. */
     private int selectedLanguage() {
         if (preferences.contains("langid")) return preferences.getInt("langid", 0x0409);

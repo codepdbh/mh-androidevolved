@@ -22,8 +22,13 @@
 #define MH_HEADER_TABLE_MIN 0x400100u   /* table never reaches into the stub */
 #define MH_PRUS_SLOT_VA     0x850000u
 
-enum { MH_REDIRECT_GET_LAST_ERROR = 1, MH_REDIRECT_VALIDATE_POINTER = 2, MH_REDIRECT_TRIGGER = 3 };
-typedef struct { uint32_t return_address; uint8_t kind; } mh_redirect_site;
+/* INTEGRITY: an anti-tamper check that requires eax == value (tools/resolve_protection_redirects.py). */
+/* RESUME: the intact wrapper removes `args` stdcall arguments and continues at `value`. */
+/* MIRROR: returns value, removes `args & 0x7f` header arguments and, with 0x80, stores value at the
+ * triple's pointer; STORE: [ebx] = ecx (tools/resolve_protection_redirects.py). */
+enum { MH_REDIRECT_GET_LAST_ERROR = 1, MH_REDIRECT_VALIDATE_POINTER = 2, MH_REDIRECT_TRIGGER = 3, MH_REDIRECT_INTEGRITY = 4, MH_REDIRECT_RESUME = 5,
+       MH_REDIRECT_MIRROR = 6, MH_REDIRECT_STORE = 7 };
+typedef struct { uint32_t return_address; uint8_t kind; uint32_t value; uint8_t args; } mh_redirect_site;
 
 /* Nonzero and *slot set when `return_address` is in the header table. */
 int mh_header_redirect_slot(const mh_guest_memory *image, uint32_t return_address, uint32_t *slot);

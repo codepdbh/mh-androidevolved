@@ -67,6 +67,16 @@ typedef struct {
     void (*draw)(void *user, mh_port *port, const mh_port_draw_call *call);
     void (*present)(void *user, mh_port *port, unsigned frame);
 } mh_port_renderer;
+/* Audio output: each change of a Miles 3D sample, with its whole state (output only: the game's
+ * view of its samples stays on the virtual clock). `data` is guest memory: 16/8-bit PCM (format 1)
+ * or IMA ADPCM (0x11); loops 0 = forever; loop_end 0xffffffff = the end; volume 0..1. */
+enum { MH_SOUND_START, MH_SOUND_STOP, MH_SOUND_RESUME, MH_SOUND_END, MH_SOUND_RELEASE, MH_SOUND_CHANGE };
+typedef struct {
+    uint32_t handle, status, format, data, length, rate, bits, channels, samples, block;
+    uint32_t loops, loop_start, loop_end, playback_rate; float volume;
+} mh_port_sound;
+typedef struct { void *user; void (*sound)(void *user, mh_port *port, const mh_port_sound *sound, int event); } mh_port_audio;
+void mh_port_set_audio(mh_port *port, const mh_port_audio *audio);
 void mh_port_set_renderer(mh_port *port, const mh_port_renderer *renderer);
 typedef struct {
     uint32_t format, width, height, levels;
@@ -76,6 +86,12 @@ typedef struct {
 int mh_port_device_size(mh_port *port, uint32_t *width, uint32_t *height);
 uint32_t mh_port_render_state(mh_port *port, uint32_t state);            /* with DirectX 8 defaults */
 uint32_t mh_port_stage_state(mh_port *port, uint32_t stage, uint32_t type);
+/* Enabled lights as D3DLIGHT8 (26 dwords each), up to `max`; and the D3DMATERIAL8 (17 dwords). */
+unsigned mh_port_lights(mh_port *port, uint32_t (*out)[26], unsigned max);
+void mh_port_material(mh_port *port, uint32_t out[17]);
+/* The current render target when it is not the back buffer (a texture level or a surface): its guest
+ * memory, size and format; 0 for the back buffer. */
+int mh_port_render_target(mh_port *port, uint32_t *memory, uint32_t *width, uint32_t *height, uint32_t *format);
 int mh_port_transform(mh_port *port, uint32_t index, float m[16]);      /* identity when never set */
 void mh_port_viewport(mh_port *port, uint32_t v[6]);                     /* X, Y, Width, Height, MinZ, MaxZ (floats as bits) */
 uint32_t mh_port_fvf(mh_port *port);
@@ -98,6 +114,8 @@ typedef struct { unsigned key, from, to; } mh_port_key_span;
  * Italian 0x0410, Spanish 0x0c0a, German 0x0c07 (its German 0x0407 falls back to English). */
 void mh_port_set_language(mh_port *port, uint32_t langid);
 void mh_port_set_key(mh_port *port, unsigned key, int down);
+/* Live relative mouse motion (DirectInput units), read by the game's next mouse GetDeviceState. */
+void mh_port_mouse_move(mh_port *port, int dx, int dy);
 int mh_port_set_key_script(mh_port *port, const mh_port_key_span *spans, unsigned n);
 unsigned mh_port_parse_key_script(const char *text, mh_port_key_span *out, unsigned max);
 uint32_t mh_port_com_next(const mh_port *port);

@@ -30,7 +30,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static boolean loaded;
     private boolean started;
 
-    private static native boolean nativeStart(Object surface, String exe, String dir, int frames, boolean realtime, int langid);
+    private static native boolean nativeStart(Object surface, String exe, String dir, int frames, boolean realtime, int langid, float scale, boolean stretch);
+    private static native void nativeMouseMove(int dx, int dy);
+    /** Intent extras: internal resolution (times the game's 640x480; 0 = the screen's), stretch to
+     *  the whole screen, on-screen controls. */
+    static final String EXTRA_SCALE = "scale", EXTRA_STRETCH = "stretch", EXTRA_CONTROLS = "controls";
     /** Intent extra: the game's language as a Windows LANGID (see LANGUAGES). */
     static final String EXTRA_LANGID = "langid";
     /** The languages of the game's texts (levels/GLOBAL/PC_TEXT) and the LANGID that selects each:
@@ -58,7 +62,15 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         SurfaceView view = new SurfaceView(this);
         view.getHolder().addCallback(this);
-        setContentView(view);
+        android.widget.FrameLayout root = new android.widget.FrameLayout(this);
+        root.addView(view);
+        if (getIntent().getBooleanExtra(EXTRA_CONTROLS, true)) {
+            root.addView(new TouchControls(this, new TouchControls.Input() {
+                @Override public void key(int scanCode, boolean down) { if (started) nativeKey(scanCode, down); }
+                @Override public void mouseMove(int dx, int dy) { if (started) nativeMouseMove(dx, dy); }
+            }));
+        }
+        setContentView(root);
         immersive();
         if (!available()) { Toast.makeText(this, "Biblioteca del juego no incluida", Toast.LENGTH_LONG).show(); finish(); return; }
         if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
@@ -79,7 +91,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }
     }
 
-    /** A touch is the left mouse button for now (it skips the intro movie; menus come next). */
+    /** Without on-screen controls, a touch is the left mouse button (it skips the intro movie). */
     @Override public boolean onTouchEvent(MotionEvent e) {
         if (!started) return super.onTouchEvent(e);
         int action = e.getActionMasked();
@@ -113,7 +125,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (started || !loaded) return;
         File exe = new File(GAME_DIR, "manhunt.exe");
         if (!exe.canRead()) { Toast.makeText(this, "No se puede leer " + exe, Toast.LENGTH_LONG).show(); return; }
-        started = nativeStart(holder.getSurface(), exe.getPath(), GAME_DIR, FRAMES, false, getIntent().getIntExtra(EXTRA_LANGID, 0x0409));
+        started = nativeStart(holder.getSurface(), exe.getPath(), GAME_DIR, FRAMES, false, getIntent().getIntExtra(EXTRA_LANGID, 0x0409),
+                              getIntent().getFloatExtra(EXTRA_SCALE, 0f), getIntent().getBooleanExtra(EXTRA_STRETCH, false));
     }
     @Override public void surfaceDestroyed(SurfaceHolder holder) {
         // The guest cannot be paused or moved to a new surface yet: leaving the game ends its process.
