@@ -141,4 +141,4 @@ El fotograma 3 es el primero del vídeo de introducción (Bink) y sale negro has
 
 **Pruebas:**
 - Los 17 escenarios coinciden con x86 en windows-x64.
-- Falta validar en el S25, porque se desconectó durante la prueba.
+- S25 (android-arm64), 2026-11-23: los 17 escenarios, incluido `save`, coinciden con la referencia x86 en todos los campos. APK instalado en el teléfono.
