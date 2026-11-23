@@ -1588,7 +1588,7 @@ def _run_binary_on_s25(binary,label,args='',max_size=4*1024*1024,timeout=180,env
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or args not in ('','"$d"','/sdcard/mh-androidevolved/manhunt.exe','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved') or max_size>32*1024*1024:raise WorkSafeError('invalid device run parameters')
     env=env or {}
-    if any(not re.fullmatch(r'MH_[A-Z_]{1,24}',k) or not re.fullmatch(r'[0-9a-f:,]{0,256}',v) for k,v in env.items()):raise WorkSafeError('invalid device environment')
+    if any(not re.fullmatch(r'MH_[A-Z_]{1,24}',k) or not re.fullmatch(r'[0-9a-f:,]{0,1024}',v) for k,v in env.items()):raise WorkSafeError('invalid device environment')
     prefix=''.join(f'{k}={v} ' for k,v in sorted(env.items()))
     adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
     if not adb.is_file():raise WorkSafeError('adb missing')

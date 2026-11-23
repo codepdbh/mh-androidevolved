@@ -91,3 +91,25 @@ El fotograma 3 es el primero del vídeo de introducción (Bink) y sale negro has
   - La referencia y el port entregan estas teclas como `WM_KEYDOWN`/`WM_CHAR`.
   - La app tiene una palanca virtual (flechas), arrastre de cámara (ratón) y botones Atacar, Fijar, Usar, Correr, Sigilo (fijo), Mirar, Inventario, Recargar, OK y Atrás.
 - **Pruebas.** 15 escenarios idénticos a x86 en Windows x64, nivel incluido. Pendiente: el S25, que se desconectó.
+
+## Juego dentro del nivel: moverse, cámara y acciones — 2026-11-23
+
+**Implementación:**
+- Escenario `play5`, de 2000 fotogramas: el recorrido hasta el nivel y después estas acciones dentro de él:
+  - andar y correr;
+  - girar a izquierda y derecha;
+  - cámara con el ratón (en ambos ejes);
+  - atacar y fijar con disparo;
+  - usar (Espacio) y sigilo andando;
+  - mirar atrás, inventario y recargar;
+  - pausa y reanudar.
+- Movimiento de ratón programado en el guion de entrada, con los códigos `0x200..0x203`.
+- `MapVirtualKeyA` (teclado estadounidense) en la referencia y en el port. La pide el juego al pulsar Usar.
+
+**Bloqueos:**
+- La primera traza se paró en el fotograma 1740 por la API `MapVirtualKeyA`, que no estaba implementada. Ya está implementada.
+- `worksafe` limitaba a 256 caracteres los valores de entorno que se envían al dispositivo. El límite sube a 1024.
+
+**Compilación:** lift de 4670 funciones y 348196 instrucciones, más biblioteca y APK.
+
+**Pruebas:** los 16 escenarios coinciden con la referencia x86 en windows-x64 y en android-arm64 (S25).
