@@ -20,6 +20,7 @@ typedef struct {
     int trace_all;                         /* log every call, also during boot phase 2 */
     unsigned langid;                       /* optional: Windows LANGID (0: English, 0x0409) */
     const char *key_script;                /* optional input script, as MH_KEYS of the reference */
+    const char *save_dir;                  /* optional host directory that also keeps the saves (default: memory only) */
     unsigned dump_at; const char *dump_path;   /* write .data/.bss at the n-th call and exit (bisection) */
 } mh_game_config;
 

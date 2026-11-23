@@ -24,7 +24,7 @@
 
 #define TAG "mh_game"
 typedef struct {
-    ANativeWindow *window; char exe[512], dir[512]; unsigned frames, langid; int realtime, stretch; float scale;
+    ANativeWindow *window; char exe[512], dir[512], saves[512]; unsigned frames, langid; int realtime, stretch; float scale;
     EGLDisplay display; EGLSurface surface; EGLContext context;
 } game_thread;
 static pthread_mutex_t started_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -102,7 +102,7 @@ static void *run(void *arg) {
     mh_port_renderer pr; mh_gles_renderer_bind(r, &pr);
     mh_game_config c; memset(&c, 0, sizeof c);
     c.exe_path = g->exe; c.game_dir = g->dir; c.frame_limit = g->frames ? g->frames : UINT_MAX;
-    c.renderer = &pr; c.user = g; c.on_ready = on_ready; c.log = log_line; c.fatal = fatal; c.langid = g->langid;
+    c.renderer = &pr; c.user = g; c.on_ready = on_ready; c.log = log_line; c.fatal = fatal; c.langid = g->langid; c.save_dir = g->saves;
     c.key_script = "100:30:34";   /* the reference's: a click at frame 30 skips the intro movie */
     int rc = mh_game_run(&c);
     __android_log_print(ANDROID_LOG_INFO, TAG, "game run ended: %d after %u calls, %u frames", rc, mh_game_calls(),
@@ -112,7 +112,7 @@ static void *run(void *arg) {
 
 JNIEXPORT jboolean JNICALL Java_com_manhuntae_android_GameActivity_nativeStart(JNIEnv *env, jclass cls, jobject surface,
                                                                                 jstring exe, jstring dir, jint frames, jboolean realtime, jint langid,
-                                                                                jfloat scale, jboolean stretch) {
+                                                                                jfloat scale, jboolean stretch, jstring saves) {
     (void)cls;
     pthread_mutex_lock(&started_lock);
     if (started) { pthread_mutex_unlock(&started_lock); return JNI_FALSE; }   /* the guest state cannot be restarted */
@@ -122,6 +122,7 @@ JNIEXPORT jboolean JNICALL Java_com_manhuntae_android_GameActivity_nativeStart(J
     const char *e = (*env)->GetStringUTFChars(env, exe, NULL), *d = (*env)->GetStringUTFChars(env, dir, NULL);
     snprintf(g->exe, sizeof g->exe, "%s", e); snprintf(g->dir, sizeof g->dir, "%s", d);
     (*env)->ReleaseStringUTFChars(env, exe, e); (*env)->ReleaseStringUTFChars(env, dir, d);
+    const char *sv = (*env)->GetStringUTFChars(env, saves, NULL); snprintf(g->saves, sizeof g->saves, "%s", sv); (*env)->ReleaseStringUTFChars(env, saves, sv);
     g->frames = (unsigned)frames; g->realtime = realtime == JNI_TRUE; g->langid = (unsigned)langid; g->scale = scale; g->stretch = stretch == JNI_TRUE;
     pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 256u << 20);
     pthread_t thread; int ok = pthread_create(&thread, &attr, run, g) == 0;

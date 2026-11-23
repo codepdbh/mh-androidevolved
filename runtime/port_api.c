@@ -33,7 +33,8 @@ typedef struct { uint32_t h, dialog, id, sel, check; unsigned n; char items[64][
 typedef struct { uint32_t hwnd, id, interval; uint64_t due; } timer;
 typedef struct { uint32_t hwnd, msg, wp, lp; } qmsg;
 typedef struct { char key[64], name[64], value[1024]; } envvar;
-typedef struct { uint32_t h; char path[MAXPATH], guest[MAXPATH]; uint64_t pos, size; int open, overlapped; } gfile;
+typedef struct { uint32_t h; char path[MAXPATH], guest[MAXPATH]; uint64_t pos, size; int open, overlapped, ov, written; } gfile;   /* ov: overlay file index + 1 */
+typedef struct { char key[MAXPATH * 2]; uint8_t *data; uint64_t size, cap, created, written; } ovfile;   /* times: virtual clock (ms) */   /* writable overlay file (saves) */
 typedef struct { uint32_t h; char path[600]; } hkey;
 typedef struct { char key[64]; uint32_t type, size; uint8_t *data; } regvalue;
 typedef struct { char key[600], name[600]; regvalue *values; unsigned nvalues; } regkey;
@@ -84,6 +85,7 @@ struct mh_port {
     struct { int32_t x, y; int32_t count; uint32_t handle; int clip; uint32_t cliprect[4]; } cursor;
     gfile *files; unsigned nfiles, capfiles;
     char overlay[16][MAXPATH]; unsigned noverlay;
+    ovfile *ovfiles; unsigned novfiles, capovfiles; char save_dir[MAXPATH];   /* overlay files; save_dir: optional host copy */
     regkey *reg; unsigned nreg; hkey hkeys[64]; unsigned nhkeys;
     dialog dialogs[8]; unsigned ndialogs; control *controls; unsigned ncontrols;
     uint32_t active, focus;
@@ -968,16 +970,73 @@ API(get_disk_free_space) {
 }
 /* files */
 #define INVALID_HANDLE 0xffffffffu
-API(create_file) {
-    (void)h; char name[MAXPATH + 1], host[MAXPATH * 2]; uint32_t err; cstr(P, a[0], name, MAXPATH);
-    if ((a[1] & 0x40000000u) || (a[4] != 3 && a[4] != 4)) fail(P, "CreateFileA for writing: '%s' access=0x%x disposition=%u", name, a[1], a[4]);
-    if (!resolve(P, name, host, sizeof host, &err) || !host_isfile(host)) { *mh_port_last_error(P) = err ? err : 2; return INVALID_HANDLE; }
+/* Writable overlay files (saves), as the reference: in memory, keyed by the case-folded full guest
+ * path; the original data is never written. With a save directory (the app's private storage) each
+ * file is also kept there: loaded when first looked up, rewritten when its handle is closed. */
+static void guest_key(mh_port *P, const char *name, char *key, size_t size) {
+    char p[MAXPATH * 2]; snprintf(p, sizeof p, "%s", name); slashes(p);
+    if (!(strlen(p) > 1 && p[1] == ':') && p[0] != '\\') snprintf(key, size, "%s\\%s", P->cwd, p); else snprintf(key, size, "%s", p);
+    lower(key);
+}
+static void save_path(mh_port *P, const char *key, char *out, size_t size) {   /* save_dir/<path below the game folder, '\\' -> '_'> */
+    const char *rel = key + strlen(MH_PORT_GAME_DIR); while (*rel == '\\') rel++;
+    snprintf(out, size, "%s" SEP "%s", P->save_dir, rel);
+    for (char *c = out + strlen(P->save_dir) + 1; *c; c++) if (*c == '\\') *c = '_';
+}
+static ovfile *ov_add(mh_port *P, const char *key) {
+    if (P->novfiles == P->capovfiles) { P->capovfiles = P->capovfiles ? 2 * P->capovfiles : 8; P->ovfiles = realloc(P->ovfiles, P->capovfiles * sizeof *P->ovfiles); }
+    ovfile *o = &P->ovfiles[P->novfiles++]; memset(o, 0, sizeof *o); snprintf(o->key, sizeof o->key, "%s", key); return o;
+}
+static int ov_find(mh_port *P, const char *key) {   /* index + 1, or 0 */
+    for (unsigned i = 0; i < P->novfiles; i++) if (!strcmp(P->ovfiles[i].key, key)) return (int)i + 1;
+    if (!P->save_dir[0]) return 0;
+    char path[MAXPATH * 3]; save_path(P, key, path, sizeof path);
+    FILE *fp = fopen(path, "rb"); if (!fp) return 0;
+    ovfile *o = ov_add(P, key); uint8_t chunk[4096]; size_t got;
+    while ((got = fread(chunk, 1, sizeof chunk, fp)) > 0) {
+        if (o->size + got > o->cap) { o->cap = (o->size + got) * 2; o->data = realloc(o->data, o->cap); }
+        memcpy(o->data + o->size, chunk, got); o->size += got;
+    }
+    fclose(fp); return (int)P->novfiles;
+}
+static void ov_store(mh_port *P, int ov) {
+    if (!P->save_dir[0] || !ov) return;
+    ovfile *o = &P->ovfiles[ov - 1]; char path[MAXPATH * 3]; save_path(P, o->key, path, sizeof path);
+    FILE *fp = fopen(path, "wb"); if (!fp) return;
+    if (o->size) fwrite(o->data, 1, o->size, fp);
+    fclose(fp);
+}
+static int overlay_dir(mh_port *P, const char *key) { for (unsigned i = 0; i < P->noverlay; i++) if (!strcmp(P->overlay[i], key)) return 1; return 0; }
+static gfile *new_file(mh_port *P, uint32_t *handle) {
     if (P->nfiles == P->capfiles) { P->capfiles = P->capfiles ? 2 * P->capfiles : 64; P->files = realloc(P->files, P->capfiles * sizeof *P->files); }
-    gfile *f = &P->files[P->nfiles]; uint32_t handle = 0x00F00004u + 4 * P->nfiles++;
-    memset(f, 0, sizeof *f); f->h = handle; snprintf(f->path, sizeof f->path, "%s", host); snprintf(f->guest, sizeof f->guest, "%s", name);
+    gfile *f = &P->files[P->nfiles]; *handle = 0x00F00004u + 4 * P->nfiles++; memset(f, 0, sizeof *f); f->h = *handle; return f;
+}
+API(create_file) {
+    (void)h; char name[MAXPATH + 1], host[MAXPATH * 2], key[MAXPATH * 2]; uint32_t err, handle, disp = a[4]; cstr(P, a[0], name, MAXPATH);
+    guest_key(P, name, key, sizeof key);
+    int ov = ov_find(P, key);
+    if ((a[1] & 0x40000000u) || (disp != 3 && disp != 4) || ov) {
+        char parent[MAXPATH * 2]; snprintf(parent, sizeof parent, "%s", key); char *cut = strrchr(parent, '\\'); if (cut) *cut = 0;
+        int parent_ok = overlay_dir(P, parent) || (resolve(P, parent, host, sizeof host, &err) && host_isdir(host));
+        if (!istarts(key, MH_PORT_GAME_DIR) || !parent_ok) { *mh_port_last_error(P) = 3; return INVALID_HANDLE; }
+        if (resolve(P, name, host, sizeof host, &err) && (host_isfile(host) || host_isdir(host))) fail(P, "CreateFileA writing original data: '%s'", name);
+        int exists = ov != 0;
+        if (disp == 1 && exists) { *mh_port_last_error(P) = 80; return INVALID_HANDLE; }
+        if ((disp == 3 || disp == 5) && !exists) { *mh_port_last_error(P) = 2; return INVALID_HANDLE; }
+        if (disp < 1 || disp > 5) { *mh_port_last_error(P) = 87; return INVALID_HANDLE; }
+        if (!exists) { ovfile *o = ov_add(P, key); o->created = o->written = P->clock; ov = (int)P->novfiles; }
+        else if (disp == 1 || disp == 2 || disp == 5) P->ovfiles[ov - 1].size = 0;
+        gfile *f = new_file(P, &handle); f->ov = ov; snprintf(f->guest, sizeof f->guest, "%s", name);
+        f->open = 1; f->overlapped = (a[5] & 0x40000000u) != 0;
+        *mh_port_last_error(P) = exists && (disp == 2 || disp == 4) ? 183 : 0; return handle;
+    }
+    if (!resolve(P, name, host, sizeof host, &err) || !host_isfile(host)) { *mh_port_last_error(P) = err ? err : 2; return INVALID_HANDLE; }
+    gfile *f = new_file(P, &handle);
+    snprintf(f->path, sizeof f->path, "%s", host); snprintf(f->guest, sizeof f->guest, "%s", name);
     f->size = host_size(host); f->open = 1; f->overlapped = (a[5] & 0x40000000u) != 0;
     *mh_port_last_error(P) = 0; return handle;
 }
+static uint64_t file_size(mh_port *P, const gfile *f) { return f->ov ? P->ovfiles[f->ov - 1].size : f->size; }
 static gfile *file(mh_port *P, uint32_t h) {
     if (h < 0x00F00004u || ((h - 0x00F00004u) & 3)) return NULL;
     uint32_t i = (h - 0x00F00004u) / 4; return i < P->nfiles && P->files[i].open ? &P->files[i] : NULL;
@@ -987,6 +1046,16 @@ API(read_file) {
     if (!f) { *mh_port_last_error(P) = 6; return 0; }
     uint64_t offset = pov ? ((uint64_t)r32(P, pov + 8) | (uint64_t)r32(P, pov + 12) << 32) : f->pos;
     size_t got = 0;
+    if (f->ov) {
+        const ovfile *o = &P->ovfiles[f->ov - 1];
+        if (offset < o->size && n) {
+            got = (size_t)(o->size - offset < n ? o->size - offset : n);
+            uint8_t *dest = mh_mem_span(P->mem, buf, (uint32_t)got);
+            if (!dest) fail(P, "ReadFile buffer outside guest memory");
+            memcpy(dest, o->data + offset, got);
+        }
+        goto done;
+    }
     FILE *fp = fopen(f->path, "rb");
     if (!fp) fail(P, "cannot reopen %s", f->path);
     if (offset < f->size && n) {
@@ -1000,11 +1069,56 @@ API(read_file) {
         got = fread(dest, 1, n, fp);
     }
     fclose(fp);
+done:
     if (pread) w32(P, pread, (uint32_t)got);
     if (pov) {
         w32(P, pov, 0); w32(P, pov + 4, (uint32_t)got);
         if (!got && n) { *mh_port_last_error(P) = 38; return 0; }
     } else f->pos = offset + got;
+    return 1;
+}
+API(write_file) {
+    (void)h; uint32_t buf = a[1], n = a[2], pwritten = a[3], pov = a[4]; gfile *f = file(P, a[0]);
+    if (!f) { *mh_port_last_error(P) = 6; return 0; }
+    if (!f->ov) fail(P, "WriteFile to original data: '%s'", f->guest);
+    uint64_t offset = pov ? ((uint64_t)r32(P, pov + 8) | (uint64_t)r32(P, pov + 12) << 32) : f->pos;
+    ovfile *o = &P->ovfiles[f->ov - 1];
+    if (offset + n > o->cap) { o->cap = (offset + n) * 2; o->data = realloc(o->data, o->cap); }
+    if (offset > o->size) memset(o->data + o->size, 0, offset - o->size);
+    if (n) { const uint8_t *src = mh_mem_span(P->mem, buf, n); if (!src) fail(P, "WriteFile buffer outside guest memory"); memcpy(o->data + offset, src, n); }
+    if (offset + n > o->size) o->size = offset + n;
+    o->written = P->clock;
+    f->written = 1;
+    if (pwritten) w32(P, pwritten, n);
+    if (pov) { w32(P, pov, 0); w32(P, pov + 4, n); }
+    else f->pos = offset + n;
+    return 1;
+}
+/* File times: FILE_EPOCH (2004-01-01 00:00 UTC as a FILETIME) plus the virtual clock (ms) when an
+ * overlay file was created / last written; original data: FILE_EPOCH (as the reference). */
+#define FILE_EPOCH ((1072915200ull + 11644473600ull) * 10000000ull)
+API(get_file_information) {
+    (void)h; gfile *f = file(P, a[0]);
+    if (!f) { *mh_port_last_error(P) = 6; return 0; }
+    uint64_t created = 0, written = 0, size = f->size; uint32_t attr = 0x01, index = 0;
+    if (f->ov) { const ovfile *o = &P->ovfiles[f->ov - 1]; created = o->created; written = o->written; size = o->size; attr = 0x20; index = (uint32_t)f->ov; }
+    uint32_t info[13] = {attr}; const uint64_t ms[3] = {created, written, written};
+    for (int i = 0; i < 3; i++) { uint64_t t = FILE_EPOCH + ms[i] * 10000u; info[1 + 2 * i] = (uint32_t)t; info[2 + 2 * i] = (uint32_t)(t >> 32); }
+    info[7] = 0x4d480001u; info[8] = (uint32_t)(size >> 32); info[9] = (uint32_t)size; info[10] = 1; info[11] = 0; info[12] = index;
+    for (int i = 0; i < 13; i++) w32(P, a[1] + 4 * i, info[i]);
+    return 1;
+}
+API(file_time_to_local) { (void)h; w32(P, a[1], r32(P, a[0])); w32(P, a[1] + 4, r32(P, a[0] + 4)); return 1; }   /* local time zone: UTC */
+API(file_time_to_system) {
+    (void)h; uint64_t t = (uint64_t)r32(P, a[0]) | (uint64_t)r32(P, a[0] + 4) << 32;
+    if (t >> 63) { *mh_port_last_error(P) = 87; return 0; }
+    int64_t ms_total = (int64_t)(t / 10000), days = ms_total / 86400000, ms = ms_total % 86400000;
+    int64_t z = days - 134774 + 719468;   /* days since 1601-01-01 -> civil date (Howard Hinnant's algorithm) */
+    int64_t era = z / 146097, doe = z - era * 146097, yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t y = yoe + era * 400, doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+    int64_t d = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9; y += m <= 2;
+    const int64_t st[8] = {y, m, (days + 1) % 7, d, ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms % 1000};
+    for (int i = 0; i < 8; i++) { uint8_t v[2] = {(uint8_t)st[i], (uint8_t)(st[i] >> 8)}; wbytes(P, a[1] + 2 * i, v, 2); }
     return 1;
 }
 API(get_overlapped_result) { (void)h; if (!file(P, a[0])) { *mh_port_last_error(P) = 6; return 0; } w32(P, a[2], r32(P, a[1] + 4)); return 1; }
@@ -1013,17 +1127,17 @@ API(set_file_pointer) {
     if (!f) { *mh_port_last_error(P) = 6; return INVALID_HANDLE; }
     int64_t dist = phi ? (int64_t)(((uint64_t)r32(P, phi) << 32) | lo) : (int64_t)s32(lo);
     int64_t base;
-    if (method == 0) base = 0; else if (method == 1) base = (int64_t)f->pos; else if (method == 2) base = (int64_t)f->size;
+    if (method == 0) base = 0; else if (method == 1) base = (int64_t)f->pos; else if (method == 2) base = (int64_t)file_size(P, f);
     else { *mh_port_last_error(P) = 131; return INVALID_HANDLE; }
     if (base + dist < 0) { *mh_port_last_error(P) = 131; return INVALID_HANDLE; }
     f->pos = (uint64_t)(base + dist);
     if (phi) w32(P, phi, (uint32_t)(f->pos >> 32));
     *mh_port_last_error(P) = 0; return (uint32_t)f->pos;
 }
-API(get_file_size) { (void)h; gfile *f = file(P, a[0]); if (!f) { *mh_port_last_error(P) = 6; return INVALID_HANDLE; } if (a[1]) w32(P, a[1], (uint32_t)(f->size >> 32)); return (uint32_t)f->size; }
+API(get_file_size) { (void)h; gfile *f = file(P, a[0]); if (!f) { *mh_port_last_error(P) = 6; return INVALID_HANDLE; } uint64_t s = file_size(P, f); if (a[1]) w32(P, a[1], (uint32_t)(s >> 32)); return (uint32_t)s; }
 API(close_handle) {
     (void)h; gfile *f = file(P, a[0]);
-    if (f) { f->open = 0; return 1; }
+    if (f) { if (f->written) ov_store(P, f->ov); f->open = 0; return 1; }
     if (a[0] > 0x50000000u && a[0] <= 0x50000000u + P->process.events) return 1;
     *mh_port_last_error(P) = 6; return 0;
 }
@@ -1040,7 +1154,10 @@ API(create_directory) {
     snprintf(P->overlay[P->noverlay++], MAXPATH, "%s", key); return 1;
 }
 API(get_file_attributes) {
-    (void)h; char name[MAXPATH + 1], host[MAXPATH * 2]; uint32_t err; cstr(P, a[0], name, MAXPATH);
+    (void)h; char name[MAXPATH + 1], host[MAXPATH * 2], key[MAXPATH * 2]; uint32_t err; cstr(P, a[0], name, MAXPATH);
+    guest_key(P, name, key, sizeof key); rstrip_bs(key);
+    if (ov_find(P, key)) return 0x20;            /* FILE_ATTRIBUTE_ARCHIVE */
+    if (overlay_dir(P, key)) return 0x10;
     if (!resolve(P, name, host, sizeof host, &err)) { *mh_port_last_error(P) = err; return INVALID_HANDLE; }
     return host_isdir(host) ? 0x10 : 0x01;
 }
@@ -1494,7 +1611,7 @@ static const struct { const char *name; unsigned nargs; api_handler fn; } APIS[]
     {"SetCursorPos",2,set_cursor_pos},{"GetCursorPos",1,get_cursor_pos},{"ShowCursor",1,show_cursor},{"SetCursor",1,set_cursor},{"ClipCursor",1,clip_cursor},
     {"AdjustWindowRect",3,adjust_window_rect},{"CreateWindowExA",12,create_window},{"DefWindowProcA",4,def_window_proc},{"GetModuleHandleA",1,get_module_handle},
     {"GetProcAddress",2,get_proc_address},{"GetDiskFreeSpaceExA",4,get_disk_free_space},{"CreateFileA",7,create_file},{"ReadFile",5,read_file},{"GetOverlappedResult",4,get_overlapped_result},{"SetFilePointer",4,set_file_pointer},
-    {"GetFileSize",2,get_file_size},{"CloseHandle",1,close_handle},{"CreateDirectoryA",2,create_directory},{"GetFileAttributesA",1,get_file_attributes},
+    {"GetFileSize",2,get_file_size},{"WriteFile",5,write_file},{"FileTimeToLocalFileTime",2,file_time_to_local},{"FileTimeToSystemTime",2,file_time_to_system},{"GetFileInformationByHandle",2,get_file_information},{"CloseHandle",1,close_handle},{"CreateDirectoryA",2,create_directory},{"GetFileAttributesA",1,get_file_attributes},
     {"RegOpenKeyExA",5,reg_open},{"RegCreateKeyExA",9,reg_create},{"RegCloseKey",1,reg_close},{"RegSetValueExA",6,reg_set_value},{"RegQueryValueExA",6,reg_query_value},
     {"DialogBoxParamA",5,dialog_box},{"EndDialog",2,end_dialog},{"GetDlgItem",2,get_dlg_item},{"GetWindowRect",2,get_window_rect},{"GetClientRect",2,get_client_rect},
     {"ClientToScreen",2,client_to_screen},{"MapVirtualKeyA",2,map_virtual_key},{"ScreenToClient",2,screen_to_client},{"SetWindowPos",7,set_window_pos},{"MoveWindow",6,move_window},
@@ -1554,7 +1671,8 @@ void mh_port_destroy(mh_port *P) {
     if (!P) return;
     for (unsigned i = 0; i < P->nobjects; i++) free(P->objects[i]);
     for (unsigned i = 0; i < P->nreg; i++) { for (unsigned j = 0; j < P->reg[i].nvalues; j++) free(P->reg[i].values[j].data); free(P->reg[i].values); }
-    free(P->objects); free(P->files); free(P->reg); free(P->controls); free(P->res_free); free(P);
+    for (unsigned i = 0; i < P->novfiles; i++) free(P->ovfiles[i].data);
+    free(P->ovfiles); free(P->objects); free(P->files); free(P->reg); free(P->controls); free(P->res_free); free(P);
 }
 uint32_t *mh_port_last_error(mh_port *P) { return &P->thread.last_error; }
 uint32_t mh_port_cwd(mh_port *P, char *out, size_t size) { snprintf(out, size, "%s", P->cwd); return (uint32_t)strlen(P->cwd); }
@@ -1566,6 +1684,7 @@ void mh_port_set_clock(mh_port *P, uint64_t (*now_ms)(void *user), void *user) {
 uint64_t mh_port_rdtsc(mh_port *P) { return P->clock * 1000000u + ++P->tsc_reads; }
 unsigned mh_port_frames(const mh_port *P) { return P->frames; }
 void mh_port_mouse_move(mh_port *P, int dx, int dy) { P->mouse_dx += dx; P->mouse_dy += dy; }
+void mh_port_set_save_dir(mh_port *P, const char *dir) { snprintf(P->save_dir, sizeof P->save_dir, "%s", dir ? dir : ""); }
 void mh_port_set_language(mh_port *P, uint32_t langid) { P->langid = langid & 0xffff; }
 void mh_port_set_key(mh_port *P, unsigned key, int down) {
     if (key < 256) P->keys[key] = down ? 1 : 0; else if (key - 0x100 < 8) P->mouse_buttons[key - 0x100] = down ? 1 : 0;

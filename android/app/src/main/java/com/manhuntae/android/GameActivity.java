@@ -30,7 +30,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static boolean loaded;
     private boolean started;
 
-    private static native boolean nativeStart(Object surface, String exe, String dir, int frames, boolean realtime, int langid, float scale, boolean stretch);
+    private static native boolean nativeStart(Object surface, String exe, String dir, int frames, boolean realtime, int langid, float scale, boolean stretch, String saves);
     private static native void nativeMouseMove(int dx, int dy);
     /** Intent extras: internal resolution (times the game's 640x480; 0 = the screen's), stretch to
      *  the whole screen, on-screen controls. */
@@ -125,8 +125,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (started || !loaded) return;
         File exe = new File(GAME_DIR, "manhunt.exe");
         if (!exe.canRead()) { Toast.makeText(this, "No se puede leer " + exe, Toast.LENGTH_LONG).show(); return; }
+        File saves = new File(getFilesDir(), "saves");   // the game's saves (User Files\\SaveGames), never in the original data
+        saves.mkdirs();
         started = nativeStart(holder.getSurface(), exe.getPath(), GAME_DIR, FRAMES, false, getIntent().getIntExtra(EXTRA_LANGID, 0x0409),
-                              getIntent().getFloatExtra(EXTRA_SCALE, 0f), getIntent().getBooleanExtra(EXTRA_STRETCH, false));
+                              getIntent().getFloatExtra(EXTRA_SCALE, 0f), getIntent().getBooleanExtra(EXTRA_STRETCH, false), saves.getPath());
     }
     @Override public void surfaceDestroyed(SurfaceHolder holder) {
         // The guest cannot be paused or moved to a new surface yet: leaving the game ends its process.

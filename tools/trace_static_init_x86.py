@@ -208,6 +208,17 @@ def main():
         elif op==0 and x==0:r=float('nan') if y==0 else (-math.inf if y>0 else math.inf)
         else:return   # in the domain: Unicorn computes it
         f80_write(1,r);f80_write(0,2.0)
+    # fnstsw: Unicorn keeps C1 (FPSW bit 9) from earlier arithmetic (rounding up) through comparisons,
+    # where an x87 clears it (FCOM/FTST/FLD set C1 = 0 without a stack fault). The port's status word
+    # carries only the compare's C0/C2/C3 (C1 = 0), so the hook clears C1 before each fnstsw: the
+    # game masks it away, but `fnstsw ax` leaves it in eax (pushed later, e.g. as stack residue).
+    from unicorn.x86_const import UC_X86_REG_FPSW as _FPSW
+    def clear_c1(uc,address,size,user):uc.reg_write(_FPSW,uc.reg_read(_FPSW)&~0x200)
+    for lo,hi in ((0x401000,0x66e200),(0x66f000,0x66f451)):
+        code=bytes(cpu.mem_read(lo,hi-lo));at=code.find(bytes((0xdf,0xe0)))   # fnstsw ax
+        while at>=0:cpu.hook_add(UC_HOOK_CODE,clear_c1,begin=lo+at,end=lo+at);at=code.find(bytes((0xdf,0xe0)),at+1)
+        for at in range(len(code)-1):   # fnstsw m16: dd /7 with a memory operand
+            if code[at]==0xdd and (code[at+1]>>3)&7==7 and code[at+1]>>6!=3:cpu.hook_add(UC_HOOK_CODE,clear_c1,begin=lo+at,end=lo+at)
     for lo,hi in ((0x401000,0x66e200),(0x66f000,0x66f451)):
         code=bytes(cpu.mem_read(lo,hi-lo))
         for pat in LOG_OPS:
@@ -344,6 +355,7 @@ def main():
         report=ROOT/'private/analysis/winmain/winmain_report.json'
         unit=json.loads(report.read_text(encoding='utf-8'))['unit_sha256'] if report.exists() else None
         if os.environ.get('MH_DUMP'):open(os.environ['MH_DUMP'],'wb').write(read(0x67d000,0x8296d4-0x67d000))
+        if os.environ.get('MH_DUMP_STACK'):open(os.environ['MH_DUMP_STACK'],'wb').write(read(STACK_TOP-0x10000,0x10014))   # the stack_crc range
         if os.environ.get('MH_DUMP_GLOBAL'):open(os.environ['MH_DUMP_GLOBAL'],'wb').write(read(GLOBAL_BASE,state['next']-GLOBAL_BASE))
         (out/'x86_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'unit_sha256':unit,'keys':os.environ.get('MH_KEYS',''),'lang':os.environ.get('MH_LANG','0409'),'cases':[case]},indent=1)+'\n',encoding='utf-8')
         print('WinMain x86 reference written: res memory',hex(res_next-0x10000000),'COM heap',hex(com['next']-0x1e40000),'calls',len(calllog))

@@ -242,10 +242,34 @@ def make(ctx):
             if match is None:return None,(2 if i==len(parts)-1 else 3)
             host=os.path.join(host,match)
         return host,0
+    # Writable overlay files (saves): in memory, keyed by the case-folded full guest path; the
+    # original data is never written. The port keeps them in memory too (and, in the app, also in
+    # its private storage).
+    state.setdefault('overlay_files',{});ovf=state['overlay_files']
+    def guest_key(name):
+        p=name.replace('/','\\')
+        if not (len(p)>1 and p[1]==':') and not p.startswith('\\'):p=state['cwd']+'\\'+p
+        return p.lower()
+    def parent_exists(key):
+        parent=key.rsplit('\\',1)[0]
+        if parent in state.setdefault('overlay_dirs',set()):return True
+        host,err=resolve(parent);return bool(host and os.path.isdir(host))
     @api('CreateFileA',7)
     def _(a):
         name=ctx['cstr'](a[0],1024);access,share,sec,disp,flags,template=a[1:7]
-        if access&0x40000000 or disp not in (3,4):unsupported(f'CreateFileA for writing: {name!r} access={access:#x} disposition={disp}')
+        key=guest_key(name)
+        if access&0x40000000 or disp not in (3,4) or key in ovf:
+            if not key.startswith(GAME_DIR.lower()) or not parent_exists(key):state['last_error']=3;return INVALID_HANDLE
+            host,err=resolve(name)
+            if host and os.path.exists(host):unsupported(f'CreateFileA writing original data: {name!r}')
+            exists=key in ovf
+            if disp==1 and exists:state['last_error']=80;return INVALID_HANDLE   # ERROR_FILE_EXISTS
+            if disp in (3,5) and not exists:state['last_error']=2;return INVALID_HANDLE
+            if disp not in (1,2,3,4,5):state['last_error']=87;return INVALID_HANDLE
+            if disp in (1,2,5) or not exists:ovf[key]=bytearray()
+            if not exists:state.setdefault('overlay_times',{})[key]=[state['clock'],state['clock']]
+            h=0x00F00004+4*len(files);files[h]={'path':None,'overlay':key,'guest':name,'pos':0,'size':0,'open':True,'overlapped':bool(flags&0x40000000)}
+            state['last_error']=183 if exists and disp in (2,4) else 0;return h
         host,err=resolve(name)
         if host is None or not os.path.isfile(host):state['last_error']=err or 2;return INVALID_HANDLE
         h=0x00F00004+4*len(files);files[h]={'path':host,'guest':name,'pos':0,'size':os.path.getsize(host),'open':True,'overlapped':bool(flags&0x40000000)}
@@ -259,7 +283,9 @@ def make(ctx):
         h,buf,n,pread,pov=a[:5];f=file(h)
         if not f:state['last_error']=6;return 0
         offset=(ctx['r32'](pov+8)|(ctx['r32'](pov+12)<<32)) if pov else f['pos']
-        with open(f['path'],'rb') as fp:fp.seek(offset);data=fp.read(n)
+        if f.get('overlay'):data=bytes(ovf[f['overlay']][offset:offset+n])
+        else:
+            with open(f['path'],'rb') as fp:fp.seek(offset);data=fp.read(n)
         if data:cpu.mem_write(buf,data)
         if pread:w32(pread,len(data))
         if pov:
@@ -268,6 +294,51 @@ def make(ctx):
             if not data and n:state['last_error']=38;return 0   # ERROR_HANDLE_EOF
         else:f['pos']=offset+len(data)
         return 1
+    @api('WriteFile',5)
+    def _(a):
+        h,buf,n,pwritten,pov=a[:5];f=file(h)
+        if not f:state['last_error']=6;return 0
+        if not f.get('overlay'):unsupported(f'WriteFile to original data: {f["guest"]!r}')
+        offset=(ctx['r32'](pov+8)|(ctx['r32'](pov+12)<<32)) if pov else f['pos']
+        d=ovf[f['overlay']];data=bytes(cpu.mem_read(buf,n)) if n else b''
+        if len(d)<offset:d.extend(bytes(offset-len(d)))
+        state['overlay_times'][f['overlay']][1]=state['clock']
+        d[offset:offset+n]=data
+        if pwritten:w32(pwritten,n)
+        if pov:
+            w32(pov,0);w32(pov+4,n);ev=ctx['r32'](pov+16)
+            if ev:state['signalled'].add(ev)
+        else:f['pos']=offset+n
+        return 1
+    FILE_EPOCH=(1072915200+11644473600)*10000000   # 2004-01-01 00:00 UTC (FILETIME), as runtime/port_api.c
+    @api('GetFileInformationByHandle',2)
+    def _(a):
+        f=file(a[0])
+        if not f:state['last_error']=6;return 0
+        if f.get('overlay'):
+            created,written=state['overlay_times'][f['overlay']];size=len(ovf[f['overlay']]);attr=0x20
+            index=list(ovf).index(f['overlay'])+1
+        else:created=written=0;size=f['size'];attr=0x01;index=0
+        info=[attr]
+        for ms in (created,written,written):t=FILE_EPOCH+ms*10000;info+=[t&0xffffffff,t>>32]
+        info+=[0x4d480001,size>>32,size&0xffffffff,1,0,index]
+        for i,v in enumerate(info):w32(a[1]+4*i,v)
+        return 1
+    @api('FileTimeToLocalFileTime',2)
+    def _(a):
+        lo,hi=ctx['r32'](a[0]),ctx['r32'](a[0]+4);w32(a[1],lo);w32(a[1]+4,hi);return 1   # local time zone: UTC
+    @api('FileTimeToSystemTime',2)
+    def _(a):
+        t=ctx['r32'](a[0])|(ctx['r32'](a[0]+4)<<32)
+        if t>>63:state['last_error']=87;return 0
+        ms_total=t//10000;days,ms=divmod(ms_total,86400000)
+        z=days-134774+719468   # days since 1601-01-01 -> civil date (Howard Hinnant's algorithm)
+        era=z//146097;doe=z-era*146097;yoe=(doe-doe//1460+doe//36524-doe//146096)//365
+        y=yoe+era*400;doy=doe-(365*yoe+yoe//4-yoe//100);mp=(5*doy+2)//153
+        d=doy-(153*mp+2)//5+1;m=mp+3 if mp<10 else mp-9;y+=m<=2
+        dow=(days+1)%7   # 1601-01-01 was a Monday
+        st=[y,m,dow,d,ms//3600000,ms//60000%60,ms//1000%60,ms%1000]
+        cpu.mem_write(a[1],b''.join(v.to_bytes(2,'little') for v in st));return 1
     @api('GetOverlappedResult',4)
     def _(a):
         if not file(a[0]):state['last_error']=6;return 0
@@ -277,7 +348,7 @@ def make(ctx):
         h,lo,phi,method=a[:4];f=file(h)
         if not f:state['last_error']=6;return INVALID_HANDLE
         dist=s32(lo) if not phi else ((ctx['r32'](phi)<<32)|lo) - ((1<<64) if ctx['r32'](phi)>>31 else 0)
-        base={0:0,1:f['pos'],2:f['size']}.get(method)
+        base={0:0,1:f['pos'],2:len(ovf[f['overlay']]) if f.get('overlay') else f['size']}.get(method)
         if base is None or base+dist<0:state['last_error']=131;return INVALID_HANDLE   # ERROR_NEGATIVE_SEEK
         f['pos']=base+dist
         if phi:w32(phi,f['pos']>>32)
@@ -286,8 +357,9 @@ def make(ctx):
     def _(a):
         f=file(a[0])
         if not f:state['last_error']=6;return INVALID_HANDLE
-        if a[1]:w32(a[1],f['size']>>32)
-        return f['size']&0xffffffff
+        size=len(ovf[f['overlay']]) if f.get('overlay') else f['size']
+        if a[1]:w32(a[1],size>>32)
+        return size&0xffffffff
     @api('CloseHandle',1)
     def _(a):
         f=file(a[0])
@@ -310,7 +382,10 @@ def make(ctx):
         state['overlay_dirs'].add(full.lower());return 1
     @api('GetFileAttributesA',1)
     def _(a):
-        host,err=resolve(ctx['cstr'](a[0],1024))
+        name=ctx['cstr'](a[0],1024);key=guest_key(name).rstrip('\\')
+        if key in ovf:return 0x20   # FILE_ATTRIBUTE_ARCHIVE
+        if key in state['overlay_dirs']:return 0x10
+        host,err=resolve(name)
         if host is None:state['last_error']=err;return INVALID_HANDLE
         return 0x10 if os.path.isdir(host) else 0x01   # FILE_ATTRIBUTE_DIRECTORY / READONLY (game data is read-only)
 

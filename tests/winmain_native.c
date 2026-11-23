@@ -30,5 +30,6 @@ int main(int argc,char **argv){
     uint8_t *g=mh_game_guest();mh_port *p=mh_game_port();
     if(getenv("MH_DUMP_GLOBAL")){FILE *d=fopen(getenv("MH_DUMP_GLOBAL"),"wb");if(d){fwrite(g+RUN_GLOBAL_BASE,1,mh_port_global(p)->next-RUN_GLOBAL_BASE,d);fclose(d);}}
     if(getenv("MH_DUMP")){FILE *d=fopen(getenv("MH_DUMP"),"wb");if(d){fwrite(g+0x67d000,1,0x8296d4-0x67d000,d);fclose(d);}}
+    if(getenv("MH_DUMP_STACK")){FILE *d=fopen(getenv("MH_DUMP_STACK"),"wb");if(d){fwrite(g+0x1800000u-0x10000,1,0x10014,d);fclose(d);}}   /* the stack_crc range */
     return 0;
 }

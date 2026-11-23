@@ -113,3 +113,32 @@ El fotograma 3 es el primero del vídeo de introducción (Bink) y sale negro has
 **Compilación:** lift de 4670 funciones y 348196 instrucciones, más biblioteca y APK.
 
 **Pruebas:** los 16 escenarios coinciden con la referencia x86 en windows-x64 y en android-arm64 (S25).
+
+## Guardar partida — 2026-11-23
+
+**Bloqueo:** en el S25, pulsar OK en GUARDAR PARTIDA congeló la imagen en el fotograma 160. El registro mostró `dispatch fault to 0x006077e0 from 0x00606410`: era la rutina de guardado en una ranura, que no estaba trazada.
+
+**Implementación:**
+- Escenario `save` de 1100 fotogramas: guarda en la primera ranura, acepta las confirmaciones y continúa.
+- Archivos escribibles en superposición. El juego escribe `User Files\SaveGames\MANHUNT0.SAV`, y esas escrituras nunca tocan los datos originales:
+  - en las pruebas se guardan en memoria;
+  - en la app van a `files/saves` (almacenamiento privado), con `mh_port_set_save_dir`.
+- APIs añadidas:
+  - `CreateFileA` para escribir;
+  - `WriteFile`;
+  - `GetFileInformationByHandle`, con época 2004-01-01 más el reloj virtual;
+  - `FileTimeToLocalFileTime`, con zona UTC;
+  - `FileTimeToSystemTime`.
+- `GetFileAttributesA` también ve los archivos y directorios de la superposición.
+- `MH_DUMP_STACK` vuelca la pila en la referencia y en el port, para buscar divergencias.
+
+**Divergencia de la referencia:** solo difería `stack_crc`, y en un único valor:
+- La causa es que Unicorn conserva C1 (bit 9 del FPSW) tras una comparación, mientras que el x87 real lo pone a 0.
+- `fnstsw ax` en 0x555d13 dejaba 0x200 en eax, que después acababa como residuo en la pila.
+- La referencia ahora borra C1 antes de cada `fnstsw`, el mismo modelo que usa el port. Con eso, la pila coincide byte a byte.
+
+**Compilación:** lift de 4692 funciones, más biblioteca y APK.
+
+**Pruebas:**
+- Los 17 escenarios coinciden con x86 en windows-x64.
+- Falta validar en el S25, porque se desconectó durante la prueba.
