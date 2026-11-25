@@ -15,6 +15,7 @@ struct mh_gles_renderer {
     int fw, fh;                             /* the framebuffer: the back buffer at the internal resolution */
     float scale; int stretch;               /* options (mh_gles_renderer_set_options): 0 bars, 1 stretched, 2 widescreen */
     float kx;                               /* the current target's horizontal scale (widescreen back buffer: < 1) */
+    int ww, wh;                             /* the window size, refreshed at every Present */
     GLuint fbo, color, depth;
     GLuint program, vbo, vao;
     GLint u_tex, u_has_tex, u_color, u_alpha, u_tfactor, u_atest, u_afunc, u_aref;
@@ -85,7 +86,8 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
      * height with the aspect kept, or the whole window when stretched. Geometry arrives in Direct3D
      * screen units and is mapped to clip space, so only the framebuffer size changes. */
     int fw, fh;
-    int ww = 0, wh = 0; r->window_size(r->user, &ww, &wh); if (ww < 1 || wh < 1) { ww = (int)w; wh = (int)h; }
+    if (r->ww < 1 || r->wh < 1) r->window_size(r->user, &r->ww, &r->wh);
+    int ww = r->ww, wh = r->wh; if (ww < 1 || wh < 1) { ww = (int)w; wh = (int)h; }
     if (r->scale > 0) { fh = (int)(h * r->scale + 0.5f); fw = r->stretch == 2 ? (int)((float)fh * ww / wh + 0.5f) : (int)(w * r->scale + 0.5f); }
     else {
         if (r->stretch) { fw = ww; fh = wh; }
@@ -255,7 +257,7 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
 static void on_present(void *user, mh_port *port, unsigned frame) {
     mh_gles_renderer *r = user; (void)frame;
     if (!ensure(r, port)) return;
-    int ww = 0, wh = 0; r->window_size(r->user, &ww, &wh);
+    int ww = 0, wh = 0; r->window_size(r->user, &ww, &wh); r->ww = ww; r->wh = wh;
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
     glViewport(0, 0, ww, wh); glDisable(GL_SCISSOR_TEST); glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);

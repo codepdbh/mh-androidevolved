@@ -179,6 +179,13 @@ size_t mh_d3d_assemble(mh_guest_memory *mem, mh_port *port, const mh_port_draw_c
     d3d_current_lighting = &lt;
     mh_d3d_vertex *v = malloc(sizeof *v * 3 * (size_t)count);
     if (!v) return 0;
+    /* indexed: a per-call cache of the fetched vertices (MinIndex, NumVertices: args 0 and 1) */
+    uint32_t cache_first = 0, cache_count = 0; mh_d3d_vertex *cache = NULL; uint8_t *cached = NULL;
+    if (indexed && call->args[1] && call->args[1] <= (1u << 20)) {
+        cache_first = call->args[0] + (call->kind == MH_DRAW_INDEXED ? basev : 0); cache_count = call->args[1];
+        cache = malloc(sizeof *cache * cache_count); cached = calloc(cache_count, 1);
+        if (!cache || !cached) { free(cache); free(cached); cache = NULL; cached = NULL; cache_count = 0; }
+    }
     size_t n = 0;
     for (uint32_t t = 0; t < count; t++) {
         uint32_t k[3];
@@ -193,10 +200,15 @@ size_t mh_d3d_assemble(mh_guest_memory *mem, mh_port *port, const mh_port_draw_c
                 index = ip ? (isz == 4 ? d3d_ru(ip) : (uint32_t)(ip[0] | ip[1] << 8)) : 0;
                 if (call->kind == MH_DRAW_INDEXED) index += basev;
             }
-            ok &= d3d_fetch(mem, &L, base, index, wvp, vp, &v[n + (size_t)j]);
+            uint32_t slot = index - cache_first;
+            if (cache && slot < cache_count) {   /* 0 = not yet fetched, 1 = ok, 2 = failed */
+                if (!cached[slot]) cached[slot] = d3d_fetch(mem, &L, base, index, wvp, vp, &cache[slot]) ? 1 : 2;
+                if (cached[slot] == 1) v[n + (size_t)j] = cache[slot]; else ok = 0;
+            } else ok &= d3d_fetch(mem, &L, base, index, wvp, vp, &v[n + (size_t)j]);
         }
         if (ok) n += 3;
     }
+    free(cache); free(cached);
     (void)length; (void)ilen; d3d_current_lighting = NULL;
     *out = v; return n;
 }

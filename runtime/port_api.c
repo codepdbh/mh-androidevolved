@@ -1530,7 +1530,9 @@ API(ail_process_audio) {
                 if (n < limit) out[n++] = (int16_t)pred;
             }
     }
-    for (uint32_t i = 0; i < n; i++) { uint8_t le[2] = {(uint8_t)out[i], (uint8_t)((uint16_t)out[i] >> 8)}; wbytes(P, dest + 2 * i, le, 2); }
+    uint8_t *le = (uint8_t *)out;   /* in place: little-endian samples */
+    for (uint32_t i = 0; i < n; i++) { uint16_t s = (uint16_t)out[i]; le[2 * i] = (uint8_t)s; le[2 * i + 1] = (uint8_t)(s >> 8); }
+    wbytes(P, dest, le, 2 * (size_t)n);
     free(out); return 2 * n;
 }
 API(ail_ms_count) { (void)a; (void)h; return (uint32_t)tick(P); }
