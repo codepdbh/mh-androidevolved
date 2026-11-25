@@ -157,4 +157,5 @@ El fotograma 3 es el primero del vídeo de introducción (Bink) y sale negro has
 
 **Pruebas:**
 - 18 escenarios coinciden con x86 en windows-x64.
-- Pendiente: validación en el S25, que está desconectado, y prueba visual de los modos de imagen.
+- S25 (android-arm64), 2026-11-25: los 18 escenarios, incluido `save2`, coinciden con x86 en todos los campos. APK instalado.
+- Pendiente: prueba visual de los modos de imagen y medición del rendimiento en una sesión real.
