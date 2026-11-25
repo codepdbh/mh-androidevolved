@@ -74,7 +74,7 @@ void mh_guest_fault(uint32_t a,size_t n){
 void mh_dispatch_fault(uint32_t a,uint32_t c){game_log("dispatch fault to 0x%08x from 0x%08x",a,c);game_exit(74);}
 static void unsupported(const char *what){game_log("%s (return 0x%08x, in 0x%08x)",what,MEM32(g_esp),g_cur_func);game_exit(81);}
 uint64_t mh_guest_rdtsc(void){return mh_port_rdtsc(port);}
-#include "winmain_unit.c"
+#include "winmain_decls.h"   /* the translated functions: winmain_unit_part*.c, compiled separately (tools/split_winmain_unit.py) */
 #include "winmain_list.h"
 #include "winmain_dispatch.h"
 #include "winmain_unresolved.h"

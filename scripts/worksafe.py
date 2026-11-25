@@ -1379,12 +1379,18 @@ def test_import_registry_on_s25():
     if result['timed_out'] or result['returncode']!=0 or not cleaned or 'MHAE_TESTS_PASSED' not in output:raise WorkSafeError('registry device test failed or cleanup unconfirmed')
     return {'tests':'registry, synthetic PE integration and Android boot clock passed','abi':'arm64-v8a','sha256':digest,'cleanup':'confirmed'}
 
+def _winmain_parts():
+    """The translated unit's separately compiled parts (tools/split_winmain_unit.py)."""
+    parts=sorted((ROOT/'private/analysis/winmain').glob('winmain_unit_part*.c'),key=lambda p:int(p.stem[len('winmain_unit_part'):]))
+    if not parts:raise WorkSafeError('translated unit parts missing; run tools/split_winmain_unit.py')
+    return parts
+
 def _winmain_input_hashes():
     """Exact local C inputs and comparison references, including optional seeded saves."""
     import hashlib
     base=ROOT/'private/analysis/winmain'
     inputs=_time_harness_input_hashes(ROOT/'tests/winmain_native.c',include_dirs=(base,))
-    paths=[base/'winmain_report.json',base/'x86_reference.json',ROOT/'tests/compare_harness.py',
+    paths=[base/'winmain_report.json',base/'x86_reference.json',ROOT/'tests/compare_harness.py',*_winmain_parts(),
            *sorted((base/'scenarios').glob('*/x86_reference.json')),
            *sorted((base/'seed_saves').glob('*'))]
     for path in paths:
@@ -1404,7 +1410,10 @@ def _require_validated_winmain():
     return record_path
 
 def _game_library_input_hashes():
-    return _time_harness_input_hashes(ROOT/'android/app/src/main/cpp/game_jni.c',include_dirs=(ROOT/'private/analysis/winmain',))
+    import hashlib
+    inputs=_time_harness_input_hashes(ROOT/'android/app/src/main/cpp/game_jni.c',include_dirs=(ROOT/'private/analysis/winmain',))
+    for path in _winmain_parts():inputs[path.relative_to(ROOT).as_posix()]=hashlib.sha256(path.read_bytes()).hexdigest()
+    return dict(sorted(inputs.items()))
 
 def _require_current_game_library():
     import hashlib
@@ -1451,7 +1460,7 @@ def build_game_library(prepare_only=False):
     includes=[str(ROOT/'private/pcrecomp/runtime/recomp32'),str(ROOT/'recomp'),str(ROOT/'runtime'),str(base)]
     out=ROOT/'private/analysis/game/android';out.mkdir(parents=True,exist_ok=True);lib=out/'libmh_game.so'
     built=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIC','-shared',
-                    *[x for d in includes for x in ('-I',d)],str(ROOT/'android/app/src/main/cpp/game_jni.c'),'-o',str(lib),
+                    *[x for d in includes for x in ('-I',d)],str(ROOT/'android/app/src/main/cpp/game_jni.c'),*map(str,_winmain_parts()),'-o',str(lib),
                     '-lGLESv3','-lEGL','-landroid','-llog','-laaudio','-lm','-Wl,-z,max-page-size=16384'],1800,'game-library-build',cfg,max_processes=4,memory_mb=6144)
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('game library build failed; inspect game-library-build logs')
     if inputs!=_game_library_input_hashes() or winmain_inputs!=_winmain_input_hashes():
@@ -1850,8 +1859,8 @@ def test_winmain(on_device=True,calls=False):
     def unchanged():
         if inputs!=_winmain_input_hashes():raise WorkSafeError('winmain inputs changed during validation')
     cl,env=_msvc_env();exe=base/'winmain-test.exe'
-    built=_run_job([str(cl),'/nologo','/Od','/std:c11',*[x for d in includes for x in ('/I',d)],'/Fo'+str(base)+'\\','/Fe'+str(exe),
-                    str(ROOT/'tests/winmain_native.c'),'/link','/INCREMENTAL:NO'],1800,'winmain-host-build',cfg,max_processes=4,memory_mb=4096,env=env)
+    built=_run_job([str(cl),'/nologo','/Od','/std:c11','/we4013',*[x for d in includes for x in ('/I',d)],'/Fo'+str(base)+'\\','/Fe'+str(exe),
+                    str(ROOT/'tests/winmain_native.c'),*map(str,_winmain_parts()),'/link','/INCREMENTAL:NO'],1800,'winmain-host-build',cfg,max_processes=4,memory_mb=4096,env=env)
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('winmain host build failed; inspect winmain-host-build logs')
     unchanged()
     game=ROOT/'Manhunt Collection'/'Manhunt'
@@ -1879,7 +1888,7 @@ def test_winmain(on_device=True,calls=False):
         ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
         out=base/'android';out.mkdir(exist_ok=True);binary=out/'winmain_test'
         arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIE','-pie',
-                      *[x for d in includes for x in ('-I',d)],str(ROOT/'tests/winmain_native.c'),'-o',str(binary),'-lm'],1800,'winmain-arm64-build',cfg,max_processes=4,memory_mb=6144)
+                      *[x for d in includes for x in ('-I',d)],str(ROOT/'tests/winmain_native.c'),*map(str,_winmain_parts()),'-o',str(binary),'-lm'],1800,'winmain-arm64-build',cfg,max_processes=4,memory_mb=6144)
         if arm['returncode']!=0 or arm['timed_out']:raise WorkSafeError('winmain ARM64 build failed')
         unchanged()
         binary_hash=hashlib.sha256(binary.read_bytes()).hexdigest()
