@@ -15,6 +15,12 @@ int main(int argc,char **argv){
     c.exe_path=argv[1];c.game_dir=argv[2];c.frame_limit=getenv("MH_FRAMES")?(unsigned)strtoul(getenv("MH_FRAMES"),NULL,10):FRAMES;c.key_script=getenv("MH_KEYS");if(getenv("MH_LANG"))c.langid=(unsigned)strtoul(getenv("MH_LANG"),NULL,16);
     if(getenv("MH_CALLLOG"))c.calllog=fopen(getenv("MH_CALLLOG"),"w");
     c.trace_all=getenv("MH_TRACE_ALL")!=NULL;
+    static char saves[1024];
+    if(getenv("MH_SAVES")){   /* saves present at start, read only: <dir>, or 1 = <the binary's folder>/saves */
+        if(strcmp(getenv("MH_SAVES"),"1"))snprintf(saves,sizeof saves,"%s",getenv("MH_SAVES"));
+        else{snprintf(saves,sizeof saves,"%s",argv[0]);char *s=strrchr(saves,'/');if(!s)s=strrchr(saves,'\\');if(s)snprintf(s+1,sizeof saves-(size_t)(s+1-saves),"saves");else snprintf(saves,sizeof saves,"saves");}
+        c.save_dir=saves;c.save_readonly=1;
+    }
     if(getenv("MH_DUMP_AT")){c.dump_at=(unsigned)strtoul(getenv("MH_DUMP_AT"),NULL,10);c.dump_path=getenv("MH_DUMP");}
     mh_port_renderer pr;
     if(getenv("MH_RENDER")){

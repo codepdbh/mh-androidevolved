@@ -11,7 +11,10 @@
 
 /* A vertex after the fixed-function vertex stage, in screen space (pixels; Direct3D samples
  * pixel centres at integer coordinates), with z in [MinZ, MaxZ] and rhw = 1/w. */
-typedef struct { float x, y, z, rhw; float diffuse[4], specular[4]; float u, v; } mh_d3d_vertex;
+typedef struct { float x, y, z, rhw; float diffuse[4], specular[4]; float u, v; float clip[4]; int has_clip; } mh_d3d_vertex;
+/* Set by a backend that clips on the GPU: untransformed vertices also carry their clip-space position
+ * (`clip`, `has_clip`) and the ones behind the camera are kept (x, y, z, rhw are then not meaningful). */
+extern int mh_d3d_keep_clip;
 
 /* Assembles a draw call into a triangle list (3 vertices per triangle). Triangles with a vertex
  * behind the eye (w <= 0, no near-plane clipping yet) are dropped. Returns the number of

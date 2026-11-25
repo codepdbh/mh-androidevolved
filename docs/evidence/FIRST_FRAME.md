@@ -142,3 +142,19 @@ El fotograma 3 es el primero del vídeo de introducción (Bink) y sale negro has
 **Pruebas:**
 - Los 17 escenarios coinciden con x86 en windows-x64.
 - S25 (android-arm64), 2026-11-23: los 17 escenarios, incluido `save`, coinciden con la referencia x86 en todos los campos. APK instalado en el teléfono.
+
+## Guardar sobre una partida existente — 2026-11-25
+
+**Bloqueo:** en el S25, con una partida ya guardada, elegir la ranura dejó el juego detenido en el fotograma 219 (`dispatch fault to 0x00605750 from 0x006051f0`). Esa rama lee la partida existente para mostrar sus datos y no estaba trazada.
+
+**Implementación:**
+- La referencia y las pruebas pueden empezar con partidas presentes (`MH_SAVES`). Las partidas de ejemplo se generan con el escenario `save` (`MH_SAVES_OUT`) y se guardan en `winmain/seed_saves`. En el S25 se suben al directorio temporal de la prueba y se eliminan al terminar.
+- `DeleteFileA` en la superposición, en la referencia y en el port. Un archivo borrado deja una marca: no se recarga desde el directorio de partidas, y uno nuevo con el mismo nombre recibe el siguiente índice. En la app se borra también la copia persistida.
+- Nuevo escenario `save2`: arranca con una partida existente y la sobrescribe en la misma ranura.
+- Renderizador OpenGL ES (fuera del estado comparado): recorta en GPU los triángulos que cruzan el plano de la cámara, porque antes se descartaban y el suelo cercano salía negro. Modos de imagen: 4:3 con bandas, estirada y panorámica (por defecto; amplía la vista 3D y mantiene la interfaz 4:3 centrada).
+
+**Compilación:** traducción de 4703 funciones a partir de la unión de 18 escenarios.
+
+**Pruebas:**
+- 18 escenarios coinciden con x86 en windows-x64.
+- Pendiente: validación en el S25, que está desconectado, y prueba visual de los modos de imagen.

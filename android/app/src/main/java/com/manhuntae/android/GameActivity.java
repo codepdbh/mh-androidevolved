@@ -30,11 +30,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static boolean loaded;
     private boolean started;
 
-    private static native boolean nativeStart(Object surface, String exe, String dir, int frames, boolean realtime, int langid, float scale, boolean stretch, String saves);
+    private static native boolean nativeStart(Object surface, String exe, String dir, int frames, boolean realtime, int langid, float scale, int display, String saves);
     private static native void nativeMouseMove(int dx, int dy);
-    /** Intent extras: internal resolution (times the game's 640x480; 0 = the screen's), stretch to
-     *  the whole screen, on-screen controls. */
-    static final String EXTRA_SCALE = "scale", EXTRA_STRETCH = "stretch", EXTRA_CONTROLS = "controls";
+    /** Intent extras: internal resolution (times the game's 640x480; 0 = the screen's), display mode
+     *  (0 = 4:3 with bars, 1 = stretched, 2 = widescreen), on-screen controls. */
+    static final String EXTRA_SCALE = "scale", EXTRA_DISPLAY = "display", EXTRA_CONTROLS = "controls";
     /** Intent extra: the game's language as a Windows LANGID (see LANGUAGES). */
     static final String EXTRA_LANGID = "langid";
     /** The languages of the game's texts (levels/GLOBAL/PC_TEXT) and the LANGID that selects each:
@@ -128,7 +128,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         File saves = new File(getFilesDir(), "saves");   // the game's saves (User Files\\SaveGames), never in the original data
         saves.mkdirs();
         started = nativeStart(holder.getSurface(), exe.getPath(), GAME_DIR, FRAMES, false, getIntent().getIntExtra(EXTRA_LANGID, 0x0409),
-                              getIntent().getFloatExtra(EXTRA_SCALE, 0f), getIntent().getBooleanExtra(EXTRA_STRETCH, false), saves.getPath());
+                              getIntent().getFloatExtra(EXTRA_SCALE, 0f), getIntent().getIntExtra(EXTRA_DISPLAY, 2), saves.getPath());
     }
     @Override public void surfaceDestroyed(SurfaceHolder holder) {
         // The guest cannot be paused or moved to a new surface yet: leaving the game ends its process.

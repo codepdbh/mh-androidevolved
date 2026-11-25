@@ -13,7 +13,8 @@ struct mh_gles_renderer {
     mh_guest_memory *mem; void *user; void (*swap)(void *); void (*window_size)(void *, int *, int *);
     uint32_t width, height;                 /* the device's back buffer (Direct3D units) */
     int fw, fh;                             /* the framebuffer: the back buffer at the internal resolution */
-    float scale; int stretch;               /* options (mh_gles_renderer_set_options) */
+    float scale; int stretch;               /* options (mh_gles_renderer_set_options): 0 bars, 1 stretched, 2 widescreen */
+    float kx;                               /* the current target's horizontal scale (widescreen back buffer: < 1) */
     GLuint fbo, color, depth;
     GLuint program, vbo, vao;
     GLint u_tex, u_has_tex, u_color, u_alpha, u_tfactor, u_atest, u_afunc, u_aref;
@@ -84,9 +85,9 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
      * height with the aspect kept, or the whole window when stretched. Geometry arrives in Direct3D
      * screen units and is mapped to clip space, so only the framebuffer size changes. */
     int fw, fh;
-    if (r->scale > 0) { fw = (int)(w * r->scale + 0.5f); fh = (int)(h * r->scale + 0.5f); }
+    int ww = 0, wh = 0; r->window_size(r->user, &ww, &wh); if (ww < 1 || wh < 1) { ww = (int)w; wh = (int)h; }
+    if (r->scale > 0) { fh = (int)(h * r->scale + 0.5f); fw = r->stretch == 2 ? (int)((float)fh * ww / wh + 0.5f) : (int)(w * r->scale + 0.5f); }
     else {
-        int ww = 0, wh = 0; r->window_size(r->user, &ww, &wh); if (ww < 1 || wh < 1) { ww = (int)w; wh = (int)h; }
         if (r->stretch) { fw = ww; fh = wh; }
         else { float s = (float)ww / w < (float)wh / h ? (float)ww / w : (float)wh / h; fw = (int)(w * s + 0.5f); fh = (int)(h * s + 0.5f); }
     }
@@ -113,7 +114,7 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
                                      memmove(r->targets, r->targets + 1, 31 * sizeof *r->targets); r->ntargets--; }
             t = &r->targets[r->ntargets++]; memset(t, 0, sizeof *t);
             t->memory = mem; t->width = tw; t->height = th;
-            t->fw = (int)(tw * (float)r->fw / w + 0.5f); t->fh = (int)(th * (float)r->fh / h + 0.5f);
+            t->fw = (int)(tw * (float)r->fh / h + 0.5f); t->fh = (int)(th * (float)r->fh / h + 0.5f);
             if (t->fw < 1) t->fw = 1; if (t->fh < 1) t->fh = 1; if (t->fw > 4096) t->fw = 4096; if (t->fh > 4096) t->fh = 4096;
             glGenTextures(1, &t->tex); glBindTexture(GL_TEXTURE_2D, t->tex);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->fw, t->fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -124,11 +125,12 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
             glClearColor(0, 0, 0, 0); glClearDepthf(1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
         glBindFramebuffer(GL_FRAMEBUFFER, t->fbo); glViewport(0, 0, t->fw, t->fh);
-        r->cw = tw; r->ch = th; r->cfw = t->fw; r->cfh = t->fh;
+        r->cw = tw; r->ch = th; r->cfw = t->fw; r->cfh = t->fh; r->kx = 1;
         return 1;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo); glViewport(0, 0, r->fw, r->fh);
     r->cw = w; r->ch = h; r->cfw = r->fw; r->cfh = r->fh;
+    r->kx = r->stretch == 2 ? ((float)w / h) / ((float)r->fw / r->fh) : 1;
     return 1;
 }
 static const gl_target *target_for(const mh_gles_renderer *r, uint32_t memory) {
@@ -181,8 +183,8 @@ static void on_clear(void *user, mh_port *port, uint32_t count, uint32_t rects, 
         uint32_t q[4]; if (!mh_mem_read(r->mem, rects + 16 * i, q, 16)) continue;
         int32_t x0 = (int32_t)q[0], y0 = (int32_t)q[1], x1 = (int32_t)q[2], y1 = (int32_t)q[3];
         /* Direct3D rectangles are top-down; the framebuffer rows are flipped (row 0 at the top in NDC). */
-        float sx = (float)r->cfw / r->cw, sy = (float)r->cfh / r->ch;
-        GLint left = (GLint)(x0 * sx + 0.5f), right = (GLint)(x1 * sx + 0.5f), top = (GLint)(y0 * sy + 0.5f), bottom = (GLint)(y1 * sy + 0.5f);
+        float sx = (float)r->cfw / r->cw, sy = (float)r->cfh / r->ch, mid = r->cfw * 0.5f;
+        GLint left = (GLint)(mid + (x0 * sx - mid) * r->kx + 0.5f), right = (GLint)(mid + (x1 * sx - mid) * r->kx + 0.5f), top = (GLint)(y0 * sy + 0.5f), bottom = (GLint)(y1 * sy + 0.5f);
         glScissor(left, r->cfh - bottom, right - left, bottom - top); glClear(mask);
     }
     glDisable(GL_SCISSOR_TEST);
@@ -195,15 +197,29 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
     mh_d3d_pixel_state s; mh_d3d_pixel_state_get(port, &s);
     float *buf = malloc(n * 14 * sizeof(float)); size_t out = 0;
     if (!buf) { free(v); return; }
+    /* clip space -> Direct3D viewport -> GL clip space (linear in the clip coordinates) */
+    uint32_t vp[6]; mh_port_viewport(port, vp); float minz, maxz; memcpy(&minz, &vp[4], 4); memcpy(&maxz, &vp[5], 4);
+    const float ax = ((float)vp[0] + vp[2] * 0.5f + 0.5f) / (float)r->cw * 2.0f - 1.0f, bx = (float)vp[2] / (float)r->cw;
+    const float ay = 1.0f - ((float)vp[1] + vp[3] * 0.5f + 0.5f) / (float)r->ch * 2.0f, by = (float)vp[3] / (float)r->ch;
     for (size_t i = 0; i + 2 < n; i += 3) {
         const mh_d3d_vertex *a = &v[i], *b = &v[i + 1], *c = &v[i + 2];
         float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
+        if (a->has_clip) {   /* the screen-space orientation (y down) is -det[x y w] */
+            const float *p = a->clip, *q = b->clip, *t = c->clip;
+            area = -(p[0] * (q[1] * t[3] - q[3] * t[1]) - p[1] * (q[0] * t[3] - q[3] * t[0]) + p[3] * (q[0] * t[1] - q[1] * t[0]));
+        }
         if (area == 0 || (s.cull == 2 && area > 0) || (s.cull == 3 && area < 0)) continue;   /* as the reference renderer */
         for (int k = 0; k < 3; k++) {
             const mh_d3d_vertex *p = &v[i + (size_t)k]; float w = p->rhw != 0 ? 1.0f / p->rhw : 1.0f, *o = buf + 14 * out++;
-            o[0] = ((p->x + 0.5f) / (float)r->cw * 2.0f - 1.0f) * w;    /* Direct3D pixel centres are at integers */
-            o[1] = (1.0f - (p->y + 0.5f) / (float)r->ch * 2.0f) * w;
-            o[2] = (p->z * 2.0f - 1.0f) * w; o[3] = w;
+            if (p->has_clip) {
+                w = p->clip[3];
+                o[0] = (ax * w + bx * p->clip[0]) * r->kx; o[1] = ay * w + by * p->clip[1];
+                o[2] = (2.0f * minz - 1.0f) * w + 2.0f * (maxz - minz) * p->clip[2]; o[3] = w;
+            } else {
+                o[0] = ((p->x + 0.5f) / (float)r->cw * 2.0f - 1.0f) * w * r->kx;    /* Direct3D pixel centres are at integers */
+                o[1] = (1.0f - (p->y + 0.5f) / (float)r->ch * 2.0f) * w;
+                o[2] = (p->z * 2.0f - 1.0f) * w; o[3] = w;
+            }
             memcpy(o + 4, p->diffuse, 16); memcpy(o + 8, p->specular, 16); o[12] = p->u; o[13] = p->v;
         }
     }
@@ -245,7 +261,8 @@ static void on_present(void *user, mh_port *port, unsigned frame) {
     glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
     /* fit the back buffer to the window: aspect ratio kept (bars), or stretched over the whole window */
     int dw = ww, dh = wh;
-    if (!r->stretch) { dh = (int)((long)ww * r->height / r->width); if (dh > wh) { dh = wh; dw = (int)((long)wh * r->width / r->height); } }
+    if (r->stretch == 2) { dh = (int)((long)ww * r->fh / r->fw); if (dh > wh) { dh = wh; dw = (int)((long)wh * r->fw / r->fh); } }
+    else if (!r->stretch) { dh = (int)((long)ww * r->height / r->width); if (dh > wh) { dh = wh; dw = (int)((long)wh * r->width / r->height); } }
     int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
     glBlitFramebuffer(0, 0, r->fw, r->fh, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, r->fw == dw && r->fh == dh ? GL_NEAREST : GL_LINEAR);
     r->swap(r->user);
@@ -254,7 +271,7 @@ static void on_present(void *user, mh_port *port, unsigned frame) {
 
 mh_gles_renderer *mh_gles_renderer_create(mh_guest_memory *memory, void *user, void (*swap)(void *), void (*window_size)(void *, int *, int *)) {
     mh_gles_renderer *r = calloc(1, sizeof *r); if (!r) return NULL;
-    r->mem = memory; r->user = user; r->swap = swap; r->window_size = window_size; r->scale = 1;
+    r->mem = memory; r->user = user; r->swap = swap; r->window_size = window_size; r->scale = 1; r->kx = 1; mh_d3d_keep_clip = 1;
     return r;
 }
 void mh_gles_renderer_destroy(mh_gles_renderer *r) {
@@ -264,5 +281,5 @@ void mh_gles_renderer_destroy(mh_gles_renderer *r) {
     if (r->program) { glDeleteProgram(r->program); glDeleteBuffers(1, &r->vbo); glDeleteVertexArrays(1, &r->vao); }
     free(r);
 }
-void mh_gles_renderer_set_options(mh_gles_renderer *r, float scale, int stretch) { r->scale = scale < 0 ? 0 : scale > 6 ? 6 : scale; r->stretch = stretch != 0; }
+void mh_gles_renderer_set_options(mh_gles_renderer *r, float scale, int stretch) { r->scale = scale < 0 ? 0 : scale > 6 ? 6 : scale; r->stretch = stretch < 0 || stretch > 2 ? 0 : stretch; mh_d3d_keep_clip = 1; }
 void mh_gles_renderer_bind(mh_gles_renderer *r, mh_port_renderer *out) { memset(out, 0, sizeof *out); out->user = r; out->clear = on_clear; out->draw = on_draw; out->present = on_present; }

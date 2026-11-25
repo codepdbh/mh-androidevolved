@@ -193,7 +193,7 @@ int mh_game_run(const mh_game_config *config){
     port=mh_port_create(&mh_recomp_region,&host,cfg.game_dir,cfg.frame_limit);if(!port)return 75;
     if(cfg.renderer)mh_port_set_renderer(port,cfg.renderer);
     if(cfg.langid)mh_port_set_language(port,cfg.langid);
-    if(cfg.save_dir)mh_port_set_save_dir(port,cfg.save_dir);
+    if(cfg.save_dir){mh_port_set_save_dir(port,cfg.save_dir);mh_port_set_save_readonly(port,cfg.save_readonly);}
     if(cfg.key_script){mh_port_key_span spans[64];unsigned n=mh_port_parse_key_script(cfg.key_script,spans,64);mh_port_set_key_script(port,spans,n);}
     if(cfg.on_ready)cfg.on_ready(cfg.user,port,&mh_recomp_region);
     /* boot phase 2 */

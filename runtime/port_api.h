@@ -117,6 +117,8 @@ void mh_port_set_key(mh_port *port, unsigned key, int down);
 /* Host directory that also keeps the game's saves (overlay files), e.g. the app's private storage;
    NULL or "" keeps them in memory only (tests). */
 void mh_port_set_save_dir(mh_port *port, const char *dir);
+/* With readonly, the save directory only seeds the overlay (tests: saves present at start). */
+void mh_port_set_save_readonly(mh_port *port, int readonly);
 /* Scripted mouse motion: script codes 0x200 (+X), 0x201 (-X), 0x202 (+Y), 0x203 (-Y) add this many units to each
    mouse GetDeviceState while active (as tools/winmain_apis.py). */
 #define MH_PORT_MOUSE_STEP 8

@@ -356,8 +356,11 @@ def main():
         unit=json.loads(report.read_text(encoding='utf-8'))['unit_sha256'] if report.exists() else None
         if os.environ.get('MH_DUMP'):open(os.environ['MH_DUMP'],'wb').write(read(0x67d000,0x8296d4-0x67d000))
         if os.environ.get('MH_DUMP_STACK'):open(os.environ['MH_DUMP_STACK'],'wb').write(read(STACK_TOP-0x10000,0x10014))   # the stack_crc range
+        if os.environ.get('MH_SAVES_OUT'):
+            os.makedirs(os.environ['MH_SAVES_OUT'],exist_ok=True)
+            for n,d in extra['ov_names'][1]().items():open(os.path.join(os.environ['MH_SAVES_OUT'],n),'wb').write(d)
         if os.environ.get('MH_DUMP_GLOBAL'):open(os.environ['MH_DUMP_GLOBAL'],'wb').write(read(GLOBAL_BASE,state['next']-GLOBAL_BASE))
-        (out/'x86_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'unit_sha256':unit,'keys':os.environ.get('MH_KEYS',''),'lang':os.environ.get('MH_LANG','0409'),'cases':[case]},indent=1)+'\n',encoding='utf-8')
+        (out/'x86_reference.json').write_text(json.dumps({'input_sha256':EXPECTED,'unit_sha256':unit,'keys':os.environ.get('MH_KEYS',''),'lang':os.environ.get('MH_LANG','0409'),**({'saves':True} if os.environ.get('MH_SAVES') else {}),'cases':[case]},indent=1)+'\n',encoding='utf-8')
         print('WinMain x86 reference written: res memory',hex(res_next-0x10000000),'COM heap',hex(com['next']-0x1e40000),'calls',len(calllog))
     print('WinMain:',len(new_blocks),'new blocks; APIs',dict(state['counts']))
     print('WinMain STOP:',werror) if werror else print('WinMain: stopped after',reached) if reached else print('WinMain returned',hex(cpu.reg_read(UC_X86_REG_EAX)))

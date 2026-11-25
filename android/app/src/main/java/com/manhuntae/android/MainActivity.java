@@ -66,9 +66,9 @@ public final class MainActivity extends Activity {
         folder.setOnClickListener(v -> selectFolder()); layout.addView(folder);
         Button play = new Button(this);
         if (GameActivity.bundled(this)) {
-            play.setText("Jugar (intro y menú principal; lee " + GameActivity.GAME_DIR + ")");
+            play.setText("Jugar · versión en desarrollo");
             play.setOnClickListener(v -> startActivity(new Intent(this, GameActivity.class).putExtra(GameActivity.EXTRA_LANGID, selectedLanguage())
-                .putExtra(GameActivity.EXTRA_SCALE, SCALES[preferences.getInt("scale", 0)]).putExtra(GameActivity.EXTRA_STRETCH, preferences.getBoolean("stretch", false))
+                .putExtra(GameActivity.EXTRA_SCALE, SCALES[preferences.getInt("scale", 0)]).putExtra(GameActivity.EXTRA_DISPLAY, preferences.getInt("display", 2))
                 .putExtra(GameActivity.EXTRA_CONTROLS, preferences.getBoolean("controls", true))));
         } else { play.setText("Jugar · aún no disponible"); play.setEnabled(false); }
         layout.addView(play);
@@ -93,11 +93,16 @@ public final class MainActivity extends Activity {
         scales.check(2000 + Math.min(preferences.getInt("scale", 0), SCALE_NAMES.length - 1));
         scales.setOnCheckedChangeListener((group, id) -> preferences.edit().putInt("scale", id - 2000).apply());
         layout.addView(scales);
-        android.widget.CheckBox stretch = new android.widget.CheckBox(this);
-        stretch.setText("Estirar a toda la pantalla (sin bandas negras)"); stretch.setTextColor(Color.LTGRAY);
-        stretch.setChecked(preferences.getBoolean("stretch", false));
-        stretch.setOnCheckedChangeListener((b, on) -> preferences.edit().putBoolean("stretch", on).apply());
-        layout.addView(stretch);
+        layout.addView(text("Imagen", 16, Color.WHITE));
+        android.widget.RadioGroup display = new android.widget.RadioGroup(this);
+        display.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < DISPLAY_NAMES.length; i++) {
+            android.widget.RadioButton option = new android.widget.RadioButton(this);
+            option.setText(DISPLAY_NAMES[i]); option.setTextColor(Color.LTGRAY); option.setId(3000 + i); display.addView(option);
+        }
+        display.check(3000 + Math.min(preferences.getInt("display", 2), DISPLAY_NAMES.length - 1));
+        display.setOnCheckedChangeListener((group, id) -> preferences.edit().putInt("display", id - 3000).apply());
+        layout.addView(display);
         android.widget.CheckBox controls = new android.widget.CheckBox(this);
         controls.setText("Controles táctiles en pantalla"); controls.setTextColor(Color.LTGRAY);
         controls.setChecked(preferences.getBoolean("controls", true));
@@ -127,6 +132,8 @@ public final class MainActivity extends Activity {
     /** Internal resolution choices: the screen's (default), or a multiple of the game's 640x480. */
     private static final String[] SCALE_NAMES = {"Pantalla", "640×480", "1280×960", "1920×1440"};
     private static final float[] SCALES = {0f, 1f, 2f, 3f};
+    /** Display modes, as GameActivity.EXTRA_DISPLAY: 4:3 with bars, stretched, widescreen (default). */
+    private static final String[] DISPLAY_NAMES = {"4:3 con bandas", "Estirada", "Panorámica"};
     /** The chosen language; by default the phone's, if the game has it, else English. */
     private int selectedLanguage() {
         if (preferences.contains("langid")) return preferences.getInt("langid", 0x0409);

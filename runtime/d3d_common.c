@@ -124,6 +124,7 @@ static void d3d_light_vertex(const d3d_lighting *lt, const float *pos, const flo
     out[0] = r > 1 ? 1 : r; out[1] = g > 1 ? 1 : g; out[2] = b > 1 ? 1 : b; out[3] = cd[3] > 1 ? 1 : cd[3] < 0 ? 0 : cd[3];
 }
 static const d3d_lighting *d3d_current_lighting;
+int mh_d3d_keep_clip;
 static int d3d_fetch(mh_guest_memory *mem, const d3d_layout *L, uint32_t base, uint32_t index, const float *wvp, const uint32_t *vp, mh_d3d_vertex *o) {
     memset(o, 0, sizeof *o);
     const uint8_t *p = mh_mem_span(mem, base + index * L->stride, L->stride ? L->stride : 16);
@@ -131,7 +132,9 @@ static int d3d_fetch(mh_guest_memory *mem, const d3d_layout *L, uint32_t base, u
     if (L->transformed) { o->x = d3d_rf(p); o->y = d3d_rf(p + 4); o->z = d3d_rf(p + 8); o->rhw = d3d_rf(p + 12); }
     else {
         float v[4] = {d3d_rf(p), d3d_rf(p + 4), d3d_rf(p + 8), 1.0f}, c[4]; d3d_mul(v, wvp, c);
-        if (c[3] <= 1e-6f) return 0;
+        if (mh_d3d_keep_clip) { memcpy(o->clip, c, sizeof c); o->has_clip = 1; }
+        if (c[3] <= 1e-6f && !mh_d3d_keep_clip) return 0;
+        if (c[3] <= 1e-6f) c[3] = 1e-6f;   /* behind the camera: only the clip-space position is used */
         float vw = (float)vp[2], vh = (float)vp[3], minz = d3d_asf(vp[4]), maxz = d3d_asf(vp[5]);   /* X, Y, Width, Height are integers */
         o->x = (float)vp[0] + (1.0f + c[0] / c[3]) * vw * 0.5f; o->y = (float)vp[1] + (1.0f - c[1] / c[3]) * vh * 0.5f;
         o->z = minz + c[2] / c[3] * (maxz - minz); o->rhw = 1.0f / c[3];

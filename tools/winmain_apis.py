@@ -250,6 +250,19 @@ def make(ctx):
         p=name.replace('/','\\')
         if not (len(p)>1 and p[1]==':') and not p.startswith('\\'):p=state['cwd']+'\\'+p
         return p.lower()
+    def ov_index(key):   # as runtime/port_api.c: the position in the port's overlay table (tombstones included), + 1
+        state['overlay_count']=state.get('overlay_count',0)+1;state.setdefault('overlay_index',{})[key]=state['overlay_count']
+    def save_name(key):   # as runtime/port_api.c save_path: the path below the game folder, '\' -> '_'
+        return key[len(GAME_DIR):].lstrip(chr(92)).replace(chr(92),'_')
+    def ov_lookup(key):   # as runtime/port_api.c ov_find: a seeded save is loaded at its first lookup
+        if key in ovf:return True
+        if key in state.setdefault('overlay_deleted',set()):return False
+        seed=os.environ.get('MH_SAVES')
+        if not seed or not key.startswith(GAME_DIR.lower()):return False
+        path=os.path.join(seed,save_name(key))
+        if not os.path.isfile(path):return False
+        ovf[key]=bytearray(open(path,'rb').read());state.setdefault('overlay_times',{})[key]=[0,0];ov_index(key);return True
+    apis['ov_names']=(0,lambda:{save_name(k):bytes(v) for k,v in ovf.items()})
     def parent_exists(key):
         parent=key.rsplit('\\',1)[0]
         if parent in state.setdefault('overlay_dirs',set()):return True
@@ -258,7 +271,7 @@ def make(ctx):
     def _(a):
         name=ctx['cstr'](a[0],1024);access,share,sec,disp,flags,template=a[1:7]
         key=guest_key(name)
-        if access&0x40000000 or disp not in (3,4) or key in ovf:
+        if access&0x40000000 or disp not in (3,4) or ov_lookup(key):
             if not key.startswith(GAME_DIR.lower()) or not parent_exists(key):state['last_error']=3;return INVALID_HANDLE
             host,err=resolve(name)
             if host and os.path.exists(host):unsupported(f'CreateFileA writing original data: {name!r}')
@@ -267,7 +280,7 @@ def make(ctx):
             if disp in (3,5) and not exists:state['last_error']=2;return INVALID_HANDLE
             if disp not in (1,2,3,4,5):state['last_error']=87;return INVALID_HANDLE
             if disp in (1,2,5) or not exists:ovf[key]=bytearray()
-            if not exists:state.setdefault('overlay_times',{})[key]=[state['clock'],state['clock']]
+            if not exists:state.setdefault('overlay_times',{})[key]=[state['clock'],state['clock']];ov_index(key);state.setdefault('overlay_deleted',set()).discard(key)
             h=0x00F00004+4*len(files);files[h]={'path':None,'overlay':key,'guest':name,'pos':0,'size':0,'open':True,'overlapped':bool(flags&0x40000000)}
             state['last_error']=183 if exists and disp in (2,4) else 0;return h
         host,err=resolve(name)
@@ -311,13 +324,22 @@ def make(ctx):
         else:f['pos']=offset+n
         return 1
     FILE_EPOCH=(1072915200+11644473600)*10000000   # 2004-01-01 00:00 UTC (FILETIME), as runtime/port_api.c
+    @api('DeleteFileA',1)
+    def _(a):
+        name=ctx['cstr'](a[0],1024);key=guest_key(name)
+        if ov_lookup(key):
+            if any(f['open'] and f.get('overlay')==key for f in files.values()):state['last_error']=32;return 0   # ERROR_SHARING_VIOLATION
+            del ovf[key];state.setdefault('overlay_deleted',set()).add(key);return 1
+        host,err=resolve(name)
+        if host and os.path.exists(host):unsupported(f'DeleteFileA on original data: {name!r}')
+        state['last_error']=2 if key.startswith(GAME_DIR.lower()) and parent_exists(key) else 3;return 0
     @api('GetFileInformationByHandle',2)
     def _(a):
         f=file(a[0])
         if not f:state['last_error']=6;return 0
         if f.get('overlay'):
             created,written=state['overlay_times'][f['overlay']];size=len(ovf[f['overlay']]);attr=0x20
-            index=list(ovf).index(f['overlay'])+1
+            index=state['overlay_index'][f['overlay']]
         else:created=written=0;size=f['size'];attr=0x01;index=0
         info=[attr]
         for ms in (created,written,written):t=FILE_EPOCH+ms*10000;info+=[t&0xffffffff,t>>32]
@@ -383,7 +405,7 @@ def make(ctx):
     @api('GetFileAttributesA',1)
     def _(a):
         name=ctx['cstr'](a[0],1024);key=guest_key(name).rstrip('\\')
-        if key in ovf:return 0x20   # FILE_ATTRIBUTE_ARCHIVE
+        if ov_lookup(key):return 0x20   # FILE_ATTRIBUTE_ARCHIVE
         if key in state['overlay_dirs']:return 0x10
         host,err=resolve(name)
         if host is None:state['last_error']=err;return INVALID_HANDLE

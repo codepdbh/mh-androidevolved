@@ -12,6 +12,7 @@
 #include "../../../../../runtime/d3d_common.c"
 #include "../../../../../runtime/gles_renderer.c"
 #include "../../../../../runtime/audio_mixer.c"
+#include "../../../../../runtime/touch_input.h"
 #include <aaudio/AAudio.h>
 #include <unistd.h>
 #include <jni.h>
@@ -29,6 +30,14 @@ typedef struct {
 } game_thread;
 static pthread_mutex_t started_lock = PTHREAD_MUTEX_INITIALIZER;
 static int started;
+static pthread_mutex_t input_lock = PTHREAD_MUTEX_INITIALIZER;
+static mh_touch_input input;
+static void apply_input(mh_port *port) {
+    uint8_t keys[MH_TOUCH_KEYS]; int32_t dx, dy;
+    pthread_mutex_lock(&input_lock); mh_touch_take(&input, keys, &dx, &dy); pthread_mutex_unlock(&input_lock);
+    for (unsigned i = 0; i < MH_TOUCH_KEYS; i++) mh_port_set_key(port, i, keys[i]);
+    if (dx || dy) mh_port_mouse_move(port, dx, dy);
+}
 
 static void log_line(const char *line) { __android_log_print(ANDROID_LOG_INFO, TAG, "%s", line); }
 static uint64_t now_ms(void *user) {
@@ -46,7 +55,26 @@ static void pace(void) {
     if (ahead > 0) usleep((useconds_t)(ahead > 200 ? 200 : ahead) * 1000);
     else if (ahead < -250) { pace_real0 = now; pace_virtual0 = virt; }   /* far behind (loading): do not rush to catch up */
 }
-static void swap(void *user) { game_thread *g = user; eglSwapBuffers(g->display, g->surface); pace(); }
+static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u; }
+static struct { uint64_t frame0, draw, present, swap, sleep, draws, frames, virt0; } perf;
+static mh_port_renderer inner;
+static void timed_draw(void *user, mh_port *port, const mh_port_draw_call *call) { uint64_t t = now_us(); inner.draw(user, port, call); perf.draw += now_us() - t; perf.draws++; }
+static void timed_present(void *user, mh_port *port, unsigned frame) {
+    uint64_t t = now_us(); inner.present(user, port, frame); perf.present += now_us() - t;
+    apply_input(port);
+    if (++perf.frames == 120) {
+        uint64_t now = now_us(), all = now - perf.frame0, virt = mh_port_clock(port);
+        uint64_t other = perf.present + perf.draw; uint64_t guest = all > other ? all - other : 0;
+        __android_log_print(ANDROID_LOG_INFO, TAG, "perf 120 frames: %.1f fps real, %.1f fps virtual; per frame ms: guest %.2f, draw %.2f (%llu calls), present %.2f (swap %.2f, pace sleep %.2f)",
+                            perf.frame0 ? 120e6 / all : 0.0, perf.virt0 && virt > perf.virt0 ? 120e3 / (double)(virt - perf.virt0) : 0.0,
+                            guest / 120e3, perf.draw / 120e3, (unsigned long long)(perf.draws / 120), perf.present / 120e3, perf.swap / 120e3, perf.sleep / 120e3);
+        memset(&perf, 0, sizeof perf); perf.frame0 = now; perf.virt0 = virt;
+    }
+}
+static void swap(void *user) {
+    game_thread *g = user; uint64_t t = now_us(); eglSwapBuffers(g->display, g->surface); uint64_t t2 = now_us(); perf.swap += t2 - t;
+    pace(); perf.sleep += now_us() - t2;
+}
 
 /* Sound: the Miles samples mixed in software (runtime/audio_mixer.c), played by AAudio. */
 static mh_mixer *mixer;
@@ -77,6 +105,7 @@ static void on_ready(void *user, mh_port *port, mh_guest_memory *memory) {
     game_thread *g = user; (void)memory;
     if (mixer) { static mh_port_audio audio; mh_mixer_bind(mixer, &audio); mh_port_set_audio(port, &audio); start_audio(); }
     if (g->realtime) mh_port_set_clock(port, now_ms, NULL);
+    memset(&perf, 0, sizeof perf); perf.frame0 = now_us(); perf.virt0 = mh_port_clock(port);
 }
 static int init_egl(game_thread *g) {
     g->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -99,7 +128,7 @@ static void *run(void *arg) {
     mh_gles_renderer *r = mh_gles_renderer_create(&mh_recomp_region, g, swap, window_size);
     mh_gles_renderer_set_options(r, g->scale, g->stretch);
     mixer = mh_mixer_create(&mh_recomp_region, 48000);
-    mh_port_renderer pr; mh_gles_renderer_bind(r, &pr);
+    mh_port_renderer pr; mh_gles_renderer_bind(r, &inner); pr = inner; pr.draw = timed_draw; pr.present = timed_present;
     mh_game_config c; memset(&c, 0, sizeof c);
     c.exe_path = g->exe; c.game_dir = g->dir; c.frame_limit = g->frames ? g->frames : UINT_MAX;
     c.renderer = &pr; c.user = g; c.on_ready = on_ready; c.log = log_line; c.fatal = fatal; c.langid = g->langid; c.save_dir = g->saves;
@@ -112,7 +141,7 @@ static void *run(void *arg) {
 
 JNIEXPORT jboolean JNICALL Java_com_manhuntae_android_GameActivity_nativeStart(JNIEnv *env, jclass cls, jobject surface,
                                                                                 jstring exe, jstring dir, jint frames, jboolean realtime, jint langid,
-                                                                                jfloat scale, jboolean stretch, jstring saves) {
+                                                                                jfloat scale, jint stretch, jstring saves) {
     (void)cls;
     pthread_mutex_lock(&started_lock);
     if (started) { pthread_mutex_unlock(&started_lock); return JNI_FALSE; }   /* the guest state cannot be restarted */
@@ -123,7 +152,7 @@ JNIEXPORT jboolean JNICALL Java_com_manhuntae_android_GameActivity_nativeStart(J
     snprintf(g->exe, sizeof g->exe, "%s", e); snprintf(g->dir, sizeof g->dir, "%s", d);
     (*env)->ReleaseStringUTFChars(env, exe, e); (*env)->ReleaseStringUTFChars(env, dir, d);
     const char *sv = (*env)->GetStringUTFChars(env, saves, NULL); snprintf(g->saves, sizeof g->saves, "%s", sv); (*env)->ReleaseStringUTFChars(env, saves, sv);
-    g->frames = (unsigned)frames; g->realtime = realtime == JNI_TRUE; g->langid = (unsigned)langid; g->scale = scale; g->stretch = stretch == JNI_TRUE;
+    g->frames = (unsigned)frames; g->realtime = realtime == JNI_TRUE; g->langid = (unsigned)langid; g->scale = scale; g->stretch = (int)stretch;
     pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 256u << 20);
     pthread_t thread; int ok = pthread_create(&thread, &attr, run, g) == 0;
     pthread_attr_destroy(&attr);
@@ -131,15 +160,12 @@ JNIEXPORT jboolean JNICALL Java_com_manhuntae_android_GameActivity_nativeStart(J
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-/* Input from the activity (UI thread): DirectInput scan codes, 0x100 + n for mouse buttons.
- * Single bytes read by the game thread at GetDeviceState. */
+/* The UI only writes the protected mailbox. Guest state is accessed by the game thread. */
 JNIEXPORT void JNICALL Java_com_manhuntae_android_GameActivity_nativeKey(JNIEnv *env, jclass cls, jint key, jboolean down) {
     (void)env; (void)cls;
-    mh_port *port = mh_game_port();
-    if (port) mh_port_set_key(port, (unsigned)key, down == JNI_TRUE);
+    pthread_mutex_lock(&input_lock); mh_touch_key(&input, (unsigned)key, down == JNI_TRUE); pthread_mutex_unlock(&input_lock);
 }
 JNIEXPORT void JNICALL Java_com_manhuntae_android_GameActivity_nativeMouseMove(JNIEnv *env, jclass cls, jint dx, jint dy) {
     (void)env; (void)cls;
-    mh_port *port = mh_game_port();
-    if (port) mh_port_mouse_move(port, dx, dy);
+    pthread_mutex_lock(&input_lock); mh_touch_move(&input, dx, dy); pthread_mutex_unlock(&input_lock);
 }
