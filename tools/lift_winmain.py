@@ -16,7 +16,8 @@ from split_winmain_unit import split
 WINMAIN=0x4c1080
 REPLACED={0x4becc0}   # GetDXVersion (HLE): see tools/winmain_apis.py
 def data_table_roots(pe):
-    """Code addresses stored in .rdata/.data (vtables, script-command and callback tables) that look
+    """Code addresses stored in .rdata/.data (vtables, script-command and callback tables) or used as
+    instruction immediates (callbacks passed as arguments) that look
     like function entries: the target of some direct call, or 16-byte aligned right after a ret,
     jmp or padding. Functions reached only through such tables (e.g. 0x4238f0 via the
     member-pointer thunk 0x616ae0) were fail-closed stops before."""
@@ -24,11 +25,15 @@ def data_table_roots(pe):
     from capstone import Cs,CS_ARCH_X86,CS_MODE_32
     base=pe.OPTIONAL_HEADER.ImageBase
     text=[s for s in pe.sections if s.Name.rstrip(b'\0')==b'.text'][0];code=text.get_data();t0=base+text.VirtualAddress;t1=t0+len(code)
-    cs=Cs(CS_ARCH_X86,CS_MODE_32);cs.skipdata=True;calls=set();after=set()
+    cs=Cs(CS_ARCH_X86,CS_MODE_32);cs.skipdata=True;calls=set();after=set();immediates=set()
     for i in cs.disasm(code,t0):
         if i.mnemonic=='call' and i.op_str.startswith('0x'):calls.add(int(i.op_str,16))
         if i.mnemonic in ('ret','jmp','nop','int3') or i.op_str in ('eax, [eax]','esi, [esi]'):after.add(i.address+i.size)
-    found=set()
+        # Code addresses passed as immediates (callbacks such as 0x58cb80, pushed for 0x61d140).
+        if i.mnemonic in ('push','mov') and i.op_str.split(',')[-1].strip().startswith('0x'):
+            v=int(i.op_str.split(',')[-1].strip(),16)
+            if t0<=v<t1:immediates.add(v)
+    found={v for v in immediates if v in calls or (v in after and v%16==0)}
     for s in pe.sections:
         if s.Name.rstrip(b'\0') not in (b'.rdata',b'.data'):continue
         raw=s.get_data()
@@ -60,7 +65,7 @@ def main():
     # Executed functions must translate; one never executed that fails the audit (e.g. the CRT's
     # SSE2 paths) stays a fail-closed stop (auto_stop). Only executed code is compared with x86.
     extra=data_table_roots(pe)-set(kept)
-    print(len(extra),'function pointers from .rdata/.data tables added as optional roots')
+    print(len(extra),'function pointers from data tables and code immediates added as optional roots')
     report=lift_closure(kept,{HEADER_STUB}|REPLACED,imports,'winmain',max_functions=40000,indirect=True,
                         auto_stop=True,x87=True,provided={HEADER_STUB}|REPLACED,dispatch_slots={PRUS_SLOT},extra_roots=extra)
     out=ROOT/'private/analysis/winmain'

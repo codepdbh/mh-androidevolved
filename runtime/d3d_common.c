@@ -161,8 +161,48 @@ size_t mh_d3d_assemble(mh_guest_memory *mem, mh_port *port, const mh_port_draw_c
     default: count = call->args[2]; imem = call->args[3]; ifmt = call->args[4]; base = call->args[5]; stride = call->args[6]; break;
     }
     *out = NULL;
-    if (call->primitive < 4 || call->primitive > 6 || !count) return 0;   /* points and lines: not drawn yet */
+    if (!count || call->primitive < 1 || call->primitive > 6) return 0;
     d3d_layout L = d3d_fvf_layout(mh_port_fvf(port), stride);
+    if (call->primitive <= 3) {
+        /* Points and lines, pre-transformed (XYZRHW) only: the game's camcorder scanlines are 240
+         * LINELIST draws a frame in screen space. Each segment becomes a 1-pixel-wide quad and
+         * each point a 1-pixel square, wound so that culling (which never applies to Direct3D
+         * lines and points) keeps them. Untransformed points/lines are still not drawn. */
+        if (!L.transformed) return 0;
+        uint32_t nverts = call->primitive == 1 ? count : call->primitive == 2 ? 2 * count : count + 1;
+        if (nverts > (1u << 20)) return 0;
+        mh_d3d_vertex *src = malloc(sizeof *src * nverts), *v = malloc(sizeof *v * 6 * (size_t)count);
+        if (!src || !v) { free(src); free(v); return 0; }
+        for (uint32_t i = 0; i < nverts; i++) {
+            uint32_t index = first + i;
+            if (indexed) {
+                uint32_t isz = ifmt == 102 ? 4 : 2; const uint8_t *ip = mh_mem_span(mem, imem + index * isz, isz);
+                index = ip ? (isz == 4 ? d3d_ru(ip) : (uint32_t)(ip[0] | ip[1] << 8)) : 0;
+                if (call->kind == MH_DRAW_INDEXED) index += basev;
+            }
+            if (!d3d_fetch(mem, &L, base, index, NULL, NULL, &src[i])) { free(src); free(v); return 0; }
+        }
+        uint32_t cull = mh_port_render_state(port, 22);   /* D3DRS_CULLMODE */
+        size_t n = 0;
+        for (uint32_t t = 0; t < count; t++) {
+            const mh_d3d_vertex *a, *b;
+            if (call->primitive == 1) a = b = &src[t];
+            else if (call->primitive == 2) { a = &src[2 * t]; b = &src[2 * t + 1]; }
+            else { a = &src[t]; b = &src[t + 1]; }
+            float dx = b->x - a->x, dy = b->y - a->y, len = sqrtf(dx * dx + dy * dy), nx, ny, ex = 0, ey = 0;
+            if (call->primitive == 1 || len < 1e-6f) { nx = 0; ny = 0.5f; ex = 0.5f; }   /* a point: a 1x1 square */
+            else { nx = -dy / len * 0.5f; ny = dx / len * 0.5f; }
+            mh_d3d_vertex q[4] = {*a, *b, *b, *a};
+            q[0].x = a->x - ex + nx; q[0].y = a->y - ey + ny; q[1].x = b->x + ex + nx; q[1].y = b->y + ey + ny;
+            q[2].x = b->x + ex - nx; q[2].y = b->y + ey - ny; q[3].x = a->x - ex - nx; q[3].y = a->y - ey - ny;
+            float area = (q[1].x - q[0].x) * (q[2].y - q[0].y) - (q[1].y - q[0].y) * (q[2].x - q[0].x);
+            int flip = (cull == 2 && area > 0) || (cull == 3 && area < 0);   /* as the renderers cull (y down) */
+            const int order[2][6] = {{0, 1, 2, 0, 2, 3}, {0, 2, 1, 0, 3, 2}};
+            for (int k = 0; k < 6; k++) v[n++] = q[order[flip][k]];
+        }
+        free(src);
+        *out = v; return n;
+    }
     float world[16], view[16], proj[16], wv[16], wvp[16]; uint32_t vp[6];
     mh_port_transform(port, 256, world); mh_port_transform(port, 2, view); mh_port_transform(port, 3, proj); mh_port_viewport(port, vp);
     for (int i = 0; i < 4; i++) d3d_mul(world + 4 * i, view, wv + 4 * i);
@@ -226,4 +266,14 @@ void mh_d3d_pixel_state_get(mh_port *port, mh_d3d_pixel_state *s) {
     s->blend = mh_port_render_state(port, 27) != 0; s->src_blend = mh_port_render_state(port, 19); s->dst_blend = mh_port_render_state(port, 20); s->blend_op = mh_port_render_state(port, 171);
     s->z_test = mh_port_render_state(port, 7) != 0; s->z_write = mh_port_render_state(port, 14) != 0; s->z_func = mh_port_render_state(port, 23);
     s->cull = mh_port_render_state(port, 22); s->color_write = mh_port_render_state(port, 168);
+    if (mh_port_render_state(port, 28)) {   /* D3DRS_FOGENABLE: table mode wins over vertex mode */
+        uint32_t table = mh_port_render_state(port, 35), vertex = mh_port_render_state(port, 140);
+        int transformed = (mh_port_fvf(port) & 0x00e) == 0x004;
+        s->fog_mode = table ? table : !vertex ? 0 : transformed ? 4 : vertex;
+        if (s->fog_mode > 4) s->fog_mode = 0;
+        if (s->fog_mode) {
+            s->fog_color = mh_port_render_state(port, 34) & 0xffffffu;
+            s->fog_start = d3d_asf(mh_port_render_state(port, 36)); s->fog_end = d3d_asf(mh_port_render_state(port, 37)); s->fog_density = d3d_asf(mh_port_render_state(port, 38));
+        }
+    }
 }

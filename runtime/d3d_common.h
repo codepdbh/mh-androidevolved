@@ -33,6 +33,9 @@ typedef struct {
     int z_test, z_write; uint32_t z_func;
     uint32_t cull;          /* D3DCULL: 1 none, 2 clockwise, 3 counter-clockwise */
     uint32_t color_write;
+    /* fog: 0 off, 1 EXP, 2 EXP2, 3 LINEAR on the eye depth (table fog, or vertex fog of untransformed
+     * vertices), 4 the factor in the specular alpha (vertex fog of pre-transformed vertices) */
+    uint32_t fog_mode, fog_color; float fog_start, fog_end, fog_density;
 } mh_d3d_pixel_state;
 void mh_d3d_pixel_state_get(mh_port *port, mh_d3d_pixel_state *s);
 #endif

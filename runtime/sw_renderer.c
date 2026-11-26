@@ -98,9 +98,17 @@ static float factor(uint32_t f, const float *src, const float *dst, int k) {
     case 7: return dst[3]; case 8: return 1 - dst[3]; case 9: return dst[k]; case 10: return 1 - dst[k]; default: return 1;
     }
 }
+/* Per-draw pixel statistics for the draw log (diagnostics only). */
+static unsigned long px_covered,px_zfail,px_afail,px_written,tris_culled;
+static float zf_min,zf_max,zb_min,zb_max;   /* failing fragments' z and the depth they lost against */
 static void shade(mh_sw_renderer *r, const pipeline *pl, int x, int y, float z, const float *diffuse, const float *specular, float u, float v) {
     const mh_d3d_pixel_state *s = pl->s; size_t at = (size_t)y * r->width + (size_t)x;
-    if (s->z_test && !compare(s->z_func, z, r->depth[at])) return;
+    px_covered++;
+    if (s->z_test && !compare(s->z_func, z, r->depth[at])) {
+        if (!px_zfail++) { zf_min = zf_max = z; zb_min = zb_max = r->depth[at]; }
+        zf_min = fminf(zf_min, z); zf_max = fmaxf(zf_max, z); zb_min = fminf(zb_min, r->depth[at]); zb_max = fmaxf(zb_max, r->depth[at]);
+        return;
+    }
     float tex[4] = {1, 1, 1, 1}, a1[4], a2[4], out[4], tf[4];
     color4(s->tfactor, tf);
     if (pl->tex) sample_texture(pl, u, v, tex);
@@ -110,7 +118,8 @@ static void shade(mh_sw_renderer *r, const pipeline *pl, int x, int y, float z, 
     for (int k = 0; k < 3; k++) out[k] = combine(colorop, a1[k], a2[k], diffuse[k]);
     arg(s->alphaarg1, diffuse, tex, tf, specular, a1); arg(s->alphaarg2, diffuse, tex, tf, specular, a2);
     out[3] = combine(s->alphaop, a1[3], a2[3], diffuse[3]);
-    if (s->alpha_test && !compare(s->alpha_func, out[3] * 255.0f, (float)s->alpha_ref)) return;
+    if (s->alpha_test && !compare(s->alpha_func, out[3] * 255.0f, (float)s->alpha_ref)) { px_afail++; return; }
+    px_written++;
     uint8_t *px = r->color + 4 * at;
     if (s->blend) {
         float dst[4] = {px[0] / 255.0f, px[1] / 255.0f, px[2] / 255.0f, px[3] / 255.0f}, src[4] = {out[0], out[1], out[2], out[3]};
@@ -123,7 +132,7 @@ static float edge(float ax, float ay, float bx, float by, float px, float py) { 
 static void triangle(mh_sw_renderer *r, const pipeline *pl, const mh_d3d_vertex *a, const mh_d3d_vertex *b, const mh_d3d_vertex *c) {
     float area = edge(a->x, a->y, b->x, b->y, c->x, c->y);
     if (area == 0) return;
-    if ((pl->s->cull == 2 && area > 0) || (pl->s->cull == 3 && area < 0)) return;   /* screen y grows down: area > 0 is clockwise */
+    if ((pl->s->cull == 2 && area > 0) || (pl->s->cull == 3 && area < 0)) { tris_culled++; return; }   /* screen y grows down: area > 0 is clockwise */
     int x0 = (int)floorf(fminf(a->x, fminf(b->x, c->x))), x1 = (int)ceilf(fmaxf(a->x, fmaxf(b->x, c->x)));
     int y0 = (int)floorf(fminf(a->y, fminf(b->y, c->y))), y1 = (int)ceilf(fmaxf(a->y, fmaxf(b->y, c->y)));
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > (int)r->width - 1) x1 = (int)r->width - 1; if (y1 > (int)r->height - 1) y1 = (int)r->height - 1;
@@ -169,7 +178,18 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
     if (r->log) fprintf(r->log, "draw kind=%d prim=%u tris=%u fvf=%03x tex=%s%ux%u fmt=%08x colorop=%u(%x,%x) alphaop=%u blend=%d(%u,%u) atest=%d z=%d/%d cull=%u\n",
                         call->kind, call->primitive, (unsigned)(n / 3), mh_port_fvf(port), s.has_texture ? "" : "none ", pl.tw, pl.th, s.has_texture ? s.texture.format : 0,
                         s.colorop, s.colorarg1, s.colorarg2, s.alphaop, s.blend, s.src_blend, s.dst_blend, s.alpha_test, s.z_test, s.z_write, s.cull);
+    if (r->log) {   /* state the renderers do not implement yet, and the target / texture identity */
+        uint32_t tm = 0, tw = 0, th = 0, tf = 0; mh_port_render_target(port, &tm, &tw, &th, &tf);
+        fprintf(r->log, "  rt=%08x texmem=%08x rtsample=%d stencil=%u(func %u ref %u pass %u) fog=%u(table %u vtx %u) stage1=%u texidx=%x ttff=%u zbias=%u\n",
+                tm, s.has_texture ? s.texture.memory[0] : 0, rt != NULL, mh_port_render_state(port, 52), mh_port_render_state(port, 56), mh_port_render_state(port, 57),
+                mh_port_render_state(port, 55), mh_port_render_state(port, 28), mh_port_render_state(port, 35), mh_port_render_state(port, 140),
+                mh_port_stage_state(port, 1, 1), mh_port_stage_state(port, 0, 11), mh_port_stage_state(port, 0, 24), mh_port_render_state(port, 47));
+    }
+    px_covered = px_zfail = px_afail = px_written = tris_culled = 0;
     for (size_t i = 0; i + 2 < n; i += 3) triangle(r, &pl, &v[i], &v[i + 1], &v[i + 2]);
+    if (r->log) fprintf(r->log, "  pixels covered=%lu zfail=%lu afail=%lu written=%lu culled_tris=%lu zfunc=%u", px_covered, px_zfail, px_afail, px_written, tris_culled, s.z_func);
+    if (r->log && px_zfail) fprintf(r->log, " fail_z=[%g,%g] depth=[%g,%g]", zf_min, zf_max, zb_min, zb_max);
+    if (r->log) { float lo = 1e30f, hi = -1e30f; for (size_t i = 0; i < n; i++) { lo = fminf(lo, v[i].z); hi = fmaxf(hi, v[i].z); } fprintf(r->log, " vz=[%g,%g]\n", n ? lo : 0, n ? hi : 0); }
     free(v);
 }
 static void on_present(void *user, mh_port *port, unsigned frame) {

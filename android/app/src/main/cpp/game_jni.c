@@ -9,6 +9,9 @@
  * not translated yet, the thread ends and the last frame stays on screen.
  * The activity runs in its own process (":game"): a fault in the guest ends only that process. */
 #include "../../../../../runtime/game_runner.c"
+#include <time.h>
+static inline uint64_t mh_prof_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec; }
+#define MH_GLES_PROFILE mh_prof_ns
 #include "../../../../../runtime/d3d_common.c"
 #include "../../../../../runtime/gles_renderer.c"
 #include "../../../../../runtime/audio_mixer.c"
@@ -22,6 +25,7 @@
 #include <EGL/egl.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
+#include <sys/system_properties.h>
 
 #define TAG "mh_game"
 typedef struct {
@@ -63,16 +67,63 @@ static void pace(void) {
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u; }
 static struct { uint64_t frame0, draw, present, swap, sleep, draws, frames, virt0; } perf;
 static mh_port_renderer inner;
-static void timed_draw(void *user, mh_port *port, const mh_port_draw_call *call) { uint64_t t = now_us(); inner.draw(user, port, call); perf.draw += now_us() - t; perf.draws++; }
+/* Diagnostics (adb shell setprop): debug.mh.skip is a mask of draws to leave out (1 sampling a
+ * render target, 2 into a render target, 4 with fog, 8 blended ZERO/INVSRCCOLOR, 16 pre-transformed);
+ * a new value of debug.mh.log logs every draw of the next frame. Read once per 120 frames. */
+static unsigned dbg_skip, dbg_log_frame; static char dbg_log_seen[PROP_VALUE_MAX];
+static void dbg_poll(void) {
+    char v[PROP_VALUE_MAX] = {0};
+    __system_property_get("debug.mh.skip", v); dbg_skip = (unsigned)strtoul(v, NULL, 0);
+    memset(v, 0, sizeof v); __system_property_get("debug.mh.log", v);
+    if (v[0] && strcmp(v, dbg_log_seen)) { memcpy(dbg_log_seen, v, sizeof v); dbg_log_frame = 1; }
+}
+static void timed_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
+    if (dbg_skip || dbg_log_frame == 2) {
+        mh_d3d_pixel_state s; mh_d3d_pixel_state_get(port, &s);
+        uint32_t tm = 0, tw = 0, th = 0, tf = 0; int into = mh_port_render_target(port, &tm, &tw, &th, &tf) && tw && th;
+        int sample = s.has_texture && target_for(user, s.texture.memory[0]) != NULL, pre = (mh_port_fvf(port) & 0x00e) == 0x004;
+        unsigned cat = (sample ? 1u : 0) | (into ? 2u : 0) | (s.fog_mode ? 4u : 0) | (s.blend && s.src_blend == 1 && s.dst_blend == 4 ? 8u : 0) | (pre ? 16u : 0);
+        if (dbg_log_frame == 2)
+            __android_log_print(ANDROID_LOG_INFO, TAG, "draw kind=%d prim=%u n=%u fvf=%03x cat=%x rt=%08x tex=%08x %ux%u fmt=%08x op=%u(%x,%x) aop=%u blend=%d(%u,%u) atest=%d(%u,%u) z=%d/%d(%u) cull=%u fog=%u(%g,%g,%06x) addr=%u/%u",
+                call->kind, call->primitive, call->args[1], mh_port_fvf(port), cat, tm, s.has_texture ? s.texture.memory[0] : 0, s.texture.level_width[0], s.texture.level_height[0], s.texture.format,
+                s.colorop, s.colorarg1, s.colorarg2, s.alphaop, s.blend, s.src_blend, s.dst_blend, s.alpha_test, s.alpha_func, s.alpha_ref, s.z_test, s.z_write, s.z_func, s.cull,
+                s.fog_mode, s.fog_start, s.fog_end, s.fog_color, s.address_u, s.address_v);
+        if (dbg_skip & cat) return;
+    }
+    uint64_t t = now_us(); inner.draw(user, port, call); perf.draw += now_us() - t; perf.draws++;
+}
+/* debug.mh.dump: a new value writes every render target as PPM (rows top-down) to the saves folder. */
+static char dbg_dump_dir[512], dbg_dump_seen[PROP_VALUE_MAX];
+static void dbg_dump(mh_gles_renderer *r) {
+    char v[PROP_VALUE_MAX] = {0}; __system_property_get("debug.mh.dump", v);
+    if (!v[0] || !strcmp(v, dbg_dump_seen) || !dbg_dump_dir[0]) return;
+    memcpy(dbg_dump_seen, v, sizeof v);
+    for (unsigned i = 0; i < r->ntargets; i++) {
+        const gl_target *t = &r->targets[i]; size_t n = (size_t)t->fw * t->fh * 4; uint8_t *px = malloc(n); if (!px) continue;
+        glBindFramebuffer(GL_FRAMEBUFFER, t->fbo); glReadPixels(0, 0, t->fw, t->fh, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        char path[700]; snprintf(path, sizeof path, "%s/rt_%s_%08x.ppm", dbg_dump_dir, v, t->memory);
+        FILE *f = fopen(path, "wb");
+        if (f) { fprintf(f, "P6\n%d %d\n255\n", t->fw, t->fh);
+                 for (int y = t->fh - 1; y >= 0; y--) for (int x = 0; x < t->fw; x++) fwrite(px + 4 * ((size_t)y * t->fw + x), 1, 3, f);
+                 fclose(f); __android_log_print(ANDROID_LOG_INFO, TAG, "dumped %s", path); }
+        free(px);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+}
 static void timed_present(void *user, mh_port *port, unsigned frame) {
+    if (perf.frames % 30 == 15) dbg_dump(user);
     uint64_t t = now_us(); inner.present(user, port, frame); perf.present += now_us() - t;
     apply_input(port);
+    if (dbg_log_frame == 2) dbg_log_frame = 0; else if (dbg_log_frame == 1) dbg_log_frame = 2;
+    if (perf.frames % 30 == 0) dbg_poll();
     if (++perf.frames == 120) {
         uint64_t now = now_us(), all = now - perf.frame0, virt = mh_port_clock(port);
         uint64_t other = perf.present + perf.draw; uint64_t guest = all > other ? all - other : 0;
-        __android_log_print(ANDROID_LOG_INFO, TAG, "perf 120 frames: %.1f fps real, %.1f fps virtual; per frame ms: guest %.2f, draw %.2f (%llu calls), present %.2f (swap %.2f, pace sleep %.2f)",
+        __android_log_print(ANDROID_LOG_INFO, TAG, "perf 120 frames: %.1f fps real, %.1f fps virtual; per frame ms: guest %.2f, draw %.2f (%llu calls), present %.2f (swap %.2f, pace sleep %.2f); draw split ms: assemble %.2f, build %.2f, gl %.2f (%llu batches)",
                             perf.frame0 ? 120e6 / all : 0.0, perf.virt0 && virt > perf.virt0 ? 120e3 / (double)(virt - perf.virt0) : 0.0,
-                            guest / 120e3, perf.draw / 120e3, (unsigned long long)(perf.draws / 120), perf.present / 120e3, perf.swap / 120e3, perf.sleep / 120e3);
+                            guest / 120e3, perf.draw / 120e3, (unsigned long long)(perf.draws / 120), perf.present / 120e3, perf.swap / 120e3, perf.sleep / 120e3,
+                            mh_gles_prof[0] / 120e6, mh_gles_prof[1] / 120e6, mh_gles_prof[2] / 120e6, (unsigned long long)(mh_gles_prof[3] / 120));
+        memset(mh_gles_prof, 0, sizeof mh_gles_prof);
         memset(&perf, 0, sizeof perf); perf.frame0 = now; perf.virt0 = virt;
     }
 }
@@ -136,7 +187,7 @@ static void *run(void *arg) {
     mh_port_renderer pr; mh_gles_renderer_bind(r, &inner); pr = inner; pr.draw = timed_draw; pr.present = timed_present;
     mh_game_config c; memset(&c, 0, sizeof c);
     c.exe_path = g->exe; c.game_dir = g->dir; c.frame_limit = g->frames ? g->frames : UINT_MAX;
-    c.renderer = &pr; c.user = g; c.on_ready = on_ready; c.log = log_line; c.fatal = fatal; c.langid = g->langid; c.save_dir = g->saves;
+    c.renderer = &pr; c.user = g; c.on_ready = on_ready; c.log = log_line; c.fatal = fatal; c.langid = g->langid; c.save_dir = g->saves; snprintf(dbg_dump_dir, sizeof dbg_dump_dir, "%s", g->saves);
     c.key_script = "100:30:34";   /* the reference's: a click at frame 30 skips the intro movie */
     int rc = mh_game_run(&c);
     __android_log_print(ANDROID_LOG_INFO, TAG, "game run ended: %d after %u calls, %u frames", rc, mh_game_calls(),

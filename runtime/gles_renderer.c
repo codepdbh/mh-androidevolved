@@ -2,6 +2,7 @@
 #include "gles_renderer.h"
 #include "d3d_common.h"
 #include <GLES3/gl3.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,11 +19,14 @@ struct mh_gles_renderer {
     int ww, wh;                             /* the window size, refreshed at every Present */
     GLuint fbo, color, depth;
     GLuint program, vbo, vao;
+    /* Batch: consecutive draws with the same pixel state and target are sent as one glDrawArrays
+     * (the camcorder scanlines are 240 one-line draws a frame; one GL draw each cost ~0.2 ms). */
+    float *pend; size_t pend_n, pend_cap; mh_d3d_pixel_state pend_state; GLuint pend_fbo, cur_fbo; int pend_vw, pend_vh, cur_vw, cur_vh;
     GLint u_tex, u_has_tex, u_color, u_alpha, u_tfactor, u_atest, u_afunc, u_aref;
     gl_texture textures[512]; unsigned ntextures;
     gl_target targets[32]; unsigned ntargets;
     uint32_t cw, ch; int cfw, cfh;          /* the current target: Direct3D size and framebuffer size */
-    GLint u_flip;
+    GLint u_flip, u_fog, u_fogcolor, u_fogp;
 };
 
 static const char *VERTEX =
@@ -36,6 +40,7 @@ static const char *FRAGMENT =
     "in vec4 v_diffuse; in vec4 v_specular; in vec2 v_uv;\n"
     "uniform sampler2D u_tex; uniform int u_has_tex; uniform ivec3 u_color; uniform ivec3 u_alpha; uniform vec4 u_tfactor;\n"
     "uniform int u_atest; uniform int u_afunc; uniform float u_aref; uniform int u_flip;\n"
+    "uniform int u_fog; uniform vec3 u_fogcolor; uniform vec3 u_fogp;\n"
     "out vec4 o;\n"
     "vec4 sel(int a, vec4 tex){ int s=a&15; vec4 r = s==2?tex : s==3?u_tfactor : s==4?v_specular : v_diffuse;\n"
     "  if((a&0x20)!=0) r=vec4(r.a); if((a&0x10)!=0) r=vec4(1.0)-r; return r; }\n"
@@ -51,6 +56,12 @@ static const char *FRAGMENT =
     "  vec4 a1=sel(u_alpha.y,tex), a2=sel(u_alpha.z,tex);\n"
     "  float al=comb(u_alpha.x,a1.a,a2.a,v_diffuse.a);\n"
     "  if(u_atest!=0 && !cmpf(u_afunc, al*255.0, u_aref)) discard;\n"
+    /* fog (see mh_d3d_pixel_state): linear fog with an end <= 1 is on the device depth, the rest on the eye depth (w) */
+    "  if(u_fog!=0){ float f;\n"
+    "    if(u_fog==4) f=v_specular.a;\n"
+    "    else { float d = (u_fog==3 && u_fogp.y<=1.0) ? gl_FragCoord.z : 1.0/gl_FragCoord.w;\n"
+    "      f = u_fog==3 ? (u_fogp.y-d)/max(u_fogp.y-u_fogp.x,1e-6) : u_fog==1 ? exp(-u_fogp.z*d) : exp(-(u_fogp.z*d)*(u_fogp.z*d)); }\n"
+    "    rgb=mix(u_fogcolor, rgb, clamp(f,0.0,1.0)); }\n"
     "  o=vec4(rgb, al);\n"
     "}\n";
 
@@ -69,6 +80,7 @@ static int init_gl(mh_gles_renderer *r) {
     r->u_tfactor = glGetUniformLocation(r->program, "u_tfactor"); r->u_atest = glGetUniformLocation(r->program, "u_atest");
     r->u_afunc = glGetUniformLocation(r->program, "u_afunc"); r->u_aref = glGetUniformLocation(r->program, "u_aref");
     r->u_flip = glGetUniformLocation(r->program, "u_flip");
+    r->u_fog = glGetUniformLocation(r->program, "u_fog"); r->u_fogcolor = glGetUniformLocation(r->program, "u_fogcolor"); r->u_fogp = glGetUniformLocation(r->program, "u_fogp");
     glGenVertexArrays(1, &r->vao); glGenBuffers(1, &r->vbo);
     glBindVertexArray(r->vao); glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
     const GLsizei stride = 14 * sizeof(float);
@@ -78,6 +90,15 @@ static int init_gl(mh_gles_renderer *r) {
     glEnableVertexAttribArray(3); glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, (void *)(12 * sizeof(float)));
     return 1;
 }
+static void flush(mh_gles_renderer *r);
+/* Optional timing (the app defines MH_GLES_PROFILE to a function returning nanoseconds):
+ * [0] assembling vertices, [1] building GL vertices, [2] flushing batches, [3] batches flushed. */
+uint64_t mh_gles_prof[4];
+#ifdef MH_GLES_PROFILE
+#define PROF_NOW() MH_GLES_PROFILE()
+#else
+#define PROF_NOW() 0
+#endif
 static int ensure(mh_gles_renderer *r, mh_port *port) {
     uint32_t w, h;
     if (!mh_port_device_size(port, &w, &h) || !w || !h) return 0;
@@ -95,6 +116,7 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
     }
     if (fw > 4096) fw = 4096; if (fh > 4096) fh = 4096; if (fw < 1) fw = 1; if (fh < 1) fh = 1;
     if (w != r->width || h != r->height || fw != r->fw || fh != r->fh) {
+        flush(r);   /* the batch may target the framebuffer about to be replaced */
         if (r->fbo) { glDeleteFramebuffers(1, &r->fbo); glDeleteRenderbuffers(1, &r->color); glDeleteRenderbuffers(1, &r->depth); }
         glGenFramebuffers(1, &r->fbo); glGenRenderbuffers(1, &r->color); glGenRenderbuffers(1, &r->depth);
         glBindRenderbuffer(GL_RENDERBUFFER, r->color); glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, fw, fh);
@@ -112,7 +134,7 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
         gl_target *t = NULL;
         for (unsigned i = 0; i < r->ntargets; i++) if (r->targets[i].memory == mem && r->targets[i].width == tw && r->targets[i].height == th) t = &r->targets[i];
         if (!t) {
-            if (r->ntargets == 32) { glDeleteTextures(1, &r->targets[0].tex); glDeleteFramebuffers(1, &r->targets[0].fbo); glDeleteRenderbuffers(1, &r->targets[0].depth);
+            if (r->ntargets == 32) { flush(r); glDeleteTextures(1, &r->targets[0].tex); glDeleteFramebuffers(1, &r->targets[0].fbo); glDeleteRenderbuffers(1, &r->targets[0].depth);
                                      memmove(r->targets, r->targets + 1, 31 * sizeof *r->targets); r->ntargets--; }
             t = &r->targets[r->ntargets++]; memset(t, 0, sizeof *t);
             t->memory = mem; t->width = tw; t->height = th;
@@ -126,11 +148,11 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
             glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t->depth);
             glClearColor(0, 0, 0, 0); glClearDepthf(1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
-        glBindFramebuffer(GL_FRAMEBUFFER, t->fbo); glViewport(0, 0, t->fw, t->fh);
+        glBindFramebuffer(GL_FRAMEBUFFER, t->fbo); glViewport(0, 0, t->fw, t->fh); r->cur_fbo = t->fbo; r->cur_vw = t->fw; r->cur_vh = t->fh;
         r->cw = tw; r->ch = th; r->cfw = t->fw; r->cfh = t->fh; r->kx = 1;
         return 1;
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo); glViewport(0, 0, r->fw, r->fh);
+    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo); glViewport(0, 0, r->fw, r->fh); r->cur_fbo = r->fbo; r->cur_vw = r->fw; r->cur_vh = r->fh;
     r->cw = w; r->ch = h; r->cfw = r->fw; r->cfh = r->fh;
     r->kx = r->stretch == 2 ? ((float)w / h) / ((float)r->fw / r->fh) : 1;
     return 1;
@@ -172,7 +194,7 @@ static GLint gl_address(uint32_t a) { return a == 2 ? GL_MIRRORED_REPEAT : a == 
 
 /* ------------------------------------------------------------------ device notifications */
 static void on_clear(void *user, mh_port *port, uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z, uint32_t stencil) {
-    mh_gles_renderer *r = user;
+    mh_gles_renderer *r = user; flush(r);
     if (!ensure(r, port)) return;
     GLbitfield mask = 0;
     if (flags & 1) { glClearColor(((color >> 16) & 255) / 255.0f, ((color >> 8) & 255) / 255.0f, (color & 255) / 255.0f, (color >> 24) / 255.0f); mask |= GL_COLOR_BUFFER_BIT; }
@@ -191,10 +213,48 @@ static void on_clear(void *user, mh_port *port, uint32_t count, uint32_t rects, 
     }
     glDisable(GL_SCISSOR_TEST);
 }
+/* Sends the pending batch to the framebuffer it was recorded for. */
+static void flush(mh_gles_renderer *r) {
+    if (!r->pend_n) return;
+    uint64_t prof_t0 = PROF_NOW(); mh_gles_prof[3]++;
+    const mh_d3d_pixel_state s = r->pend_state;
+    glBindFramebuffer(GL_FRAMEBUFFER, r->pend_fbo); glViewport(0, 0, r->pend_vw, r->pend_vh);
+    glUseProgram(r->program); glBindVertexArray(r->vao); glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(r->pend_n * 14 * sizeof(float)), r->pend, GL_STREAM_DRAW);
+    glActiveTexture(GL_TEXTURE0);
+    const gl_target *rt = s.has_texture ? target_for(r, s.texture.memory[0]) : NULL;
+    glUniform1i(r->u_flip, rt != NULL);
+    if (s.has_texture) {
+        glBindTexture(GL_TEXTURE_2D, rt ? rt->tex : texture(r, &s.texture));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s.mag_filter == 1 ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, s.min_filter == 1 ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(s.address_u)); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(s.address_v));
+    }
+    glUniform1i(r->u_tex, 0); glUniform1i(r->u_has_tex, s.has_texture);
+    glUniform3i(r->u_color, (GLint)s.colorop, (GLint)s.colorarg1, (GLint)s.colorarg2);
+    glUniform3i(r->u_alpha, (GLint)s.alphaop, (GLint)s.alphaarg1, (GLint)s.alphaarg2);
+    glUniform4f(r->u_tfactor, ((s.tfactor >> 16) & 255) / 255.0f, ((s.tfactor >> 8) & 255) / 255.0f, (s.tfactor & 255) / 255.0f, (s.tfactor >> 24) / 255.0f);
+    glUniform1i(r->u_fog, (GLint)s.fog_mode); glUniform3f(r->u_fogcolor, ((s.fog_color >> 16) & 255) / 255.0f, ((s.fog_color >> 8) & 255) / 255.0f, (s.fog_color & 255) / 255.0f);
+    glUniform3f(r->u_fogp, s.fog_start, s.fog_end, s.fog_density);
+    glUniform1i(r->u_atest, s.alpha_test); glUniform1i(r->u_afunc, (GLint)s.alpha_func); glUniform1f(r->u_aref, (float)s.alpha_ref);
+    if (s.blend) {
+        static const GLenum ops[6] = {GL_FUNC_ADD, GL_FUNC_ADD, GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT, GL_MIN, GL_MAX};
+        glEnable(GL_BLEND); glBlendFunc(gl_blend(s.src_blend), gl_blend(s.dst_blend)); glBlendEquation(s.blend_op < 6 ? ops[s.blend_op] : GL_FUNC_ADD);
+    } else glDisable(GL_BLEND);
+    if (s.z_test) { glEnable(GL_DEPTH_TEST); glDepthFunc(gl_compare(s.z_func)); } else glDisable(GL_DEPTH_TEST);
+    glDepthMask(s.z_write ? GL_TRUE : GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glColorMask((s.color_write & 1) != 0, (s.color_write & 2) != 0, (s.color_write & 4) != 0, (s.color_write & 8) != 0);
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)r->pend_n);
+    r->pend_n = 0; mh_gles_prof[2] += PROF_NOW() - prof_t0;
+    glBindFramebuffer(GL_FRAMEBUFFER, r->cur_fbo); glViewport(0, 0, r->cur_vw, r->cur_vh);
+}
 static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
     mh_gles_renderer *r = user;
     if (!ensure(r, port)) return;
+    uint64_t prof_t0 = PROF_NOW();
     mh_d3d_vertex *v = NULL; size_t n = mh_d3d_assemble(r->mem, port, call, &v);
+    uint64_t prof_t1 = PROF_NOW(); mh_gles_prof[0] += prof_t1 - prof_t0;
     if (!n) { free(v); return; }
     mh_d3d_pixel_state s; mh_d3d_pixel_state_get(port, &s);
     float *buf = malloc(n * 14 * sizeof(float)); size_t out = 0;
@@ -212,50 +272,45 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
         }
         if (area == 0 || (s.cull == 2 && area > 0) || (s.cull == 3 && area < 0)) continue;   /* as the reference renderer */
         for (int k = 0; k < 3; k++) {
-            const mh_d3d_vertex *p = &v[i + (size_t)k]; float w = p->rhw != 0 ? 1.0f / p->rhw : 1.0f, *o = buf + 14 * out++;
+            const mh_d3d_vertex *p = &v[i + (size_t)k]; float w = p->rhw > 0 ? 1.0f / p->rhw : 1.0f, *o = buf + 14 * out++;
             if (p->has_clip) {
                 w = p->clip[3];
                 o[0] = (ax * w + bx * p->clip[0]) * r->kx; o[1] = ay * w + by * p->clip[1];
                 o[2] = (2.0f * minz - 1.0f) * w + 2.0f * (maxz - minz) * p->clip[2]; o[3] = w;
             } else {
-                o[0] = ((p->x + 0.5f) / (float)r->cw * 2.0f - 1.0f) * w * r->kx;    /* Direct3D pixel centres are at integers */
-                o[1] = (1.0f - (p->y + 0.5f) / (float)r->ch * 2.0f) * w;
-                o[2] = (p->z * 2.0f - 1.0f) * w; o[3] = w;
+                /* Into a render target (drawn at the internal scale, then sampled): each coordinate is
+                 * moved to the pixel boundary Direct3D's coverage gives at the target's own size (pixel
+                 * i is drawn when its centre i is inside), so the same pixels are covered at any scale.
+                 * Without it the shadow pass leaves the target's first row and column at the clear
+                 * colour, and the clamped shadow projection then darkens the floor around the player. */
+                float px = p->x, py = p->y;
+                if (r->cur_fbo != r->fbo) { px = ceilf(px) - 0.5f; py = ceilf(py) - 0.5f; }
+                o[0] = ((px + 0.5f) / (float)r->cw * 2.0f - 1.0f) * w * r->kx;    /* Direct3D pixel centres are at integers */
+                o[1] = (1.0f - (py + 0.5f) / (float)r->ch * 2.0f) * w;
+                /* Direct3D does not clip pre-transformed vertices against the depth range: the HUD, the
+                 * camcorder overlay and the shadow pass draw at z = 3276. GL would clip them; z is clamped. */
+                float z = p->z < 0 ? 0 : p->z > 1 ? 1 : p->z;
+                o[2] = (z * 2.0f - 1.0f) * w; o[3] = w;
             }
             memcpy(o + 4, p->diffuse, 16); memcpy(o + 8, p->specular, 16); o[12] = p->u; o[13] = p->v;
         }
     }
     free(v);
+    mh_gles_prof[1] += PROF_NOW() - prof_t1;
     if (!out) { free(buf); return; }
-    glUseProgram(r->program); glBindVertexArray(r->vao); glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(out * 14 * sizeof(float)), buf, GL_STREAM_DRAW);
-    free(buf);
-    glActiveTexture(GL_TEXTURE0);
-    const gl_target *rt = s.has_texture ? target_for(r, s.texture.memory[0]) : NULL;
-    glUniform1i(r->u_flip, rt != NULL);
-    if (s.has_texture) {
-        glBindTexture(GL_TEXTURE_2D, rt ? rt->tex : texture(r, &s.texture));
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s.mag_filter == 1 ? GL_NEAREST : GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, s.min_filter == 1 ? GL_NEAREST : GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(s.address_u)); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(s.address_v));
+    /* a different state or target ends the batch; a very large one is sent as it is */
+    if (r->pend_n && (r->pend_fbo != r->cur_fbo || memcmp(&r->pend_state, &s, sizeof s) || r->pend_n + out > (1u << 20))) flush(r);
+    if (r->pend_n + out > r->pend_cap) {
+        size_t cap = r->pend_cap ? r->pend_cap : 65536; while (cap < r->pend_n + out) cap *= 2;
+        float *grown = realloc(r->pend, cap * 14 * sizeof(float)); if (!grown) { free(buf); return; }
+        r->pend = grown; r->pend_cap = cap;
     }
-    glUniform1i(r->u_tex, 0); glUniform1i(r->u_has_tex, s.has_texture);
-    glUniform3i(r->u_color, (GLint)s.colorop, (GLint)s.colorarg1, (GLint)s.colorarg2);
-    glUniform3i(r->u_alpha, (GLint)s.alphaop, (GLint)s.alphaarg1, (GLint)s.alphaarg2);
-    glUniform4f(r->u_tfactor, ((s.tfactor >> 16) & 255) / 255.0f, ((s.tfactor >> 8) & 255) / 255.0f, (s.tfactor & 255) / 255.0f, (s.tfactor >> 24) / 255.0f);
-    glUniform1i(r->u_atest, s.alpha_test); glUniform1i(r->u_afunc, (GLint)s.alpha_func); glUniform1f(r->u_aref, (float)s.alpha_ref);
-    if (s.blend) {
-        static const GLenum ops[6] = {GL_FUNC_ADD, GL_FUNC_ADD, GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT, GL_MIN, GL_MAX};
-        glEnable(GL_BLEND); glBlendFunc(gl_blend(s.src_blend), gl_blend(s.dst_blend)); glBlendEquation(s.blend_op < 6 ? ops[s.blend_op] : GL_FUNC_ADD);
-    } else glDisable(GL_BLEND);
-    if (s.z_test) { glEnable(GL_DEPTH_TEST); glDepthFunc(gl_compare(s.z_func)); } else glDisable(GL_DEPTH_TEST);
-    glDepthMask(s.z_write ? GL_TRUE : GL_FALSE);
-    glDisable(GL_CULL_FACE);
-    glColorMask((s.color_write & 1) != 0, (s.color_write & 2) != 0, (s.color_write & 4) != 0, (s.color_write & 8) != 0);
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)out);
+    memcpy(r->pend + 14 * r->pend_n, buf, out * 14 * sizeof(float)); free(buf);
+    if (!r->pend_n) { r->pend_state = s; r->pend_fbo = r->cur_fbo; r->pend_vw = r->cur_vw; r->pend_vh = r->cur_vh; }
+    r->pend_n += out;
 }
 static void on_present(void *user, mh_port *port, unsigned frame) {
-    mh_gles_renderer *r = user; (void)frame;
+    mh_gles_renderer *r = user; (void)frame; flush(r);
     if (!ensure(r, port)) return;
     int ww = 0, wh = 0; r->window_size(r->user, &ww, &wh); r->ww = ww; r->wh = wh;
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
@@ -281,6 +336,7 @@ void mh_gles_renderer_destroy(mh_gles_renderer *r) {
     for (unsigned i = 0; i < r->ntextures; i++) glDeleteTextures(1, &r->textures[i].id);
     if (r->fbo) { glDeleteFramebuffers(1, &r->fbo); glDeleteRenderbuffers(1, &r->color); glDeleteRenderbuffers(1, &r->depth); }
     if (r->program) { glDeleteProgram(r->program); glDeleteBuffers(1, &r->vbo); glDeleteVertexArrays(1, &r->vao); }
+    free(r->pend); r->pend = NULL; r->pend_n = r->pend_cap = 0;
     free(r);
 }
 void mh_gles_renderer_set_options(mh_gles_renderer *r, float scale, int stretch) { r->scale = scale < 0 ? 0 : scale > 6 ? 6 : scale; r->stretch = stretch < 0 || stretch > 2 ? 0 : stretch; mh_d3d_keep_clip = 1; }
