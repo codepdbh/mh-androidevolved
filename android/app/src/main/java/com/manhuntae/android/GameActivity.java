@@ -35,6 +35,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     /** Intent extras: internal resolution (times the game's 640x480; 0 = the screen's), display mode
      *  (0 = 4:3 with bars, 1 = stretched, 2 = widescreen), on-screen controls. */
     static final String EXTRA_SCALE = "scale", EXTRA_DISPLAY = "display", EXTRA_CONTROLS = "controls";
+    /** Intent extra: the game's clock follows real time instead of the deterministic virtual clock
+     *  (1 ms per query, the one the x86 references were traced with). Smoother when the device is
+     *  faster than the game's clock queries imply; off by default because only the virtual clock
+     *  reproduces the validated paths exactly. */
+    static final String EXTRA_REALTIME = "realtime";
     /** Intent extra: the game's language as a Windows LANGID (see LANGUAGES). */
     static final String EXTRA_LANGID = "langid";
     /** The languages of the game's texts (levels/GLOBAL/PC_TEXT) and the LANGID that selects each:
@@ -127,7 +132,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (!exe.canRead()) { Toast.makeText(this, "No se puede leer " + exe, Toast.LENGTH_LONG).show(); return; }
         File saves = new File(getFilesDir(), "saves");   // the game's saves (User Files\\SaveGames), never in the original data
         saves.mkdirs();
-        started = nativeStart(holder.getSurface(), exe.getPath(), GAME_DIR, FRAMES, false, getIntent().getIntExtra(EXTRA_LANGID, 0x0409),
+        started = nativeStart(holder.getSurface(), exe.getPath(), GAME_DIR, FRAMES, getIntent().getBooleanExtra(EXTRA_REALTIME, false),
+                              getIntent().getIntExtra(EXTRA_LANGID, 0x0409),
                               getIntent().getFloatExtra(EXTRA_SCALE, 0f), getIntent().getIntExtra(EXTRA_DISPLAY, 2), saves.getPath());
     }
     @Override public void surfaceDestroyed(SurfaceHolder holder) {

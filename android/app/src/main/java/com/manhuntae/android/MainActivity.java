@@ -69,7 +69,8 @@ public final class MainActivity extends Activity {
             play.setText("Jugar · versión en desarrollo");
             play.setOnClickListener(v -> startActivity(new Intent(this, GameActivity.class).putExtra(GameActivity.EXTRA_LANGID, selectedLanguage())
                 .putExtra(GameActivity.EXTRA_SCALE, SCALES[preferences.getInt("scale", 0)]).putExtra(GameActivity.EXTRA_DISPLAY, preferences.getInt("display", 2))
-                .putExtra(GameActivity.EXTRA_CONTROLS, preferences.getBoolean("controls", true))));
+                .putExtra(GameActivity.EXTRA_CONTROLS, preferences.getBoolean("controls", true))
+                .putExtra(GameActivity.EXTRA_REALTIME, preferences.getBoolean("realtime", false))));
         } else { play.setText("Jugar · aún no disponible"); play.setEnabled(false); }
         layout.addView(play);
         layout.addView(text("Idioma del juego", 16, Color.WHITE));
@@ -108,6 +109,11 @@ public final class MainActivity extends Activity {
         controls.setChecked(preferences.getBoolean("controls", true));
         controls.setOnCheckedChangeListener((b, on) -> preferences.edit().putBoolean("controls", on).apply());
         layout.addView(controls);
+        android.widget.CheckBox realtime = new android.widget.CheckBox(this);
+        realtime.setText("Reloj en tiempo real (experimental: más fluido; fuera de los recorridos validados)"); realtime.setTextColor(Color.LTGRAY);
+        realtime.setChecked(preferences.getBoolean("realtime", false));
+        realtime.setOnCheckedChangeListener((b, on) -> preferences.edit().putBoolean("realtime", on).apply());
+        layout.addView(realtime);
         layout.addView(text("Código traducido del juego", 20, Color.WHITE));
         translatedStatus = text("Ejecuta en un proceso aislado la candidata de tiempo traducida con datos sintéticos y compara el resultado con el validado frente a x86. No arranca el juego.", 14, Color.LTGRAY);
         layout.addView(translatedStatus);

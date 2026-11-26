@@ -47,7 +47,12 @@ static uint64_t now_ms(void *user) {
 /* Pacing: the game runs on its virtual clock (the translated path is the traced one); real time
  * is held to it at every presented frame, so the picture and the sound (played in real time) agree. */
 static uint64_t pace_real0, pace_virtual0;
+/* With the real-time clock (EXTRA_REALTIME) the game's clock already is real time: there is
+ * nothing to hold back, and a baseline taken from a stale clock sample would be slept on
+ * every frame (measured: ~107 ms a frame, 9 fps on the S25). */
+static int pace_realtime;
 static void pace(void) {
+    if (pace_realtime) return;
     mh_port *port = mh_game_port(); if (!port) return;
     uint64_t now = now_ms(NULL), virt = mh_port_clock(port);
     if (!pace_real0) { pace_real0 = now; pace_virtual0 = virt; return; }
@@ -104,7 +109,7 @@ static void fatal(void *user, int code) {
 static void on_ready(void *user, mh_port *port, mh_guest_memory *memory) {
     game_thread *g = user; (void)memory;
     if (mixer) { static mh_port_audio audio; mh_mixer_bind(mixer, &audio); mh_port_set_audio(port, &audio); start_audio(); }
-    if (g->realtime) mh_port_set_clock(port, now_ms, NULL);
+    if (g->realtime) { mh_port_set_clock(port, now_ms, NULL); pace_realtime = 1; }
     memset(&perf, 0, sizeof perf); perf.frame0 = now_us(); perf.virt0 = mh_port_clock(port);
 }
 static int init_egl(game_thread *g) {
