@@ -1,5 +1,7 @@
 # Estado técnico
 
+2026-11-26, más reciente: este archivo no recoge los avances del 18 al 25-11 (arranque completo, WinMain, backend OpenGL ES, primer nivel y guardado); el estado vigente está en `docs/CURRENT_STATE.md`. Hoy se validó en Windows y en el S25 la traducción completa de 7658 funciones (18 escenarios idénticos a x86), se actualizó la app y el juego abrió en el S25 hasta el menú principal a 45 fps.
+
 2026-11-17, **bloqueo**: al trazar los 98 inicializadores en la referencia x86, el undécimo (`0x455ff0`) entra en el código del *wrapper* de protección del ejecutable (secciones `.prus`/`.izbf`, rellenas en tiempo de ejecución, donde también está el punto de entrada). Por la regla de no eludir protecciones, el port no ejecuta, emula ni reconstruye ese código, y el trazador se detiene ahí. El arranque completo no puede avanzar con este ejecutable. Ver `docs/BOOT_PROTECTION_BLOCKER.md`.
 
 2026-11-17, más reciente — **arranque, fase 1**: el S25 lee `manhunt.exe`, lo mapea en memoria invitada como Windows y ejecuta traducidos 86 de los 98 inicializadores estáticos de C++ (417 funciones), incluida la creación del pool de 64 MiB. Coinciden con x86 en Windows y en el S25 la imagen completa, `.data`, `.bss`, la pila y la memoria reservada. Nuevas piezas: CPU virtual determinista, despacho indirecto controlado, lista blanca de macros (excluye los `jo`/`jp` falsos de PCRecomp) y paradas automáticas. Ver `docs/evidence/S25_BOOT_PHASE1.md`.

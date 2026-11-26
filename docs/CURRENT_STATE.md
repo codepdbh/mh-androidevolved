@@ -1,4 +1,4 @@
-# Estado vigente — 24 de noviembre de 2026
+# Estado vigente — 26 de noviembre de 2026
 
 El port ejecuta el arranque, el menú y recorridos del primer nivel como código traducido. Tiene backend OpenGL ES, entrada táctil y guardado separado de los datos originales. La cobertura está limitada a las rutas traducidas: una sesión libre todavía puede alcanzar una función pendiente y detenerse. No se ha validado el juego completo.
 
@@ -13,6 +13,9 @@ El port ejecuta el arranque, el menú y recorridos del primer nivel como código
 
 ## Compilación y pruebas
 
+- 26-11: **traducción completa (7658 funciones) validada en las dos plataformas** con el NDK 29.0.14206865, el único instalado: 18 escenarios idénticos a x86 en Windows x64 y en el S25. El S25 se desconectó de ADB tras 10 escenarios; `resume_winmain_on_s25()` confirmó la limpieza del intento interrumpido y completó los 8 restantes.
+- 26-11: compilados `libmh_game.so` (SHA-256 `862d9b91…`) y `libmh_runtime.so` con el NDK 29. Hubo que borrar la caché de CMake, que seguía apuntando al NDK 28.2. La APK privada se actualizó en el S25 conservando datos y partidas, y `launch_game_on_s25()` abrió el juego. Se corrigió la búsqueda del botón «Jugar», que Android muestra en mayúsculas.
+- 26-11: en el S25 el juego muestra el menú principal en español con los controles táctiles. Corre a 45,4 fps estables (por fotograma: 15,5 ms de código traducido, 0,24 ms de dibujo y unos 6 ms de espera del limitador) y sin errores en el registro. La captura se guarda en `private/` porque contiene imágenes del juego.
 - 23-11: 17 escenarios comparados con x86 en Windows x64 y Android ARM64 en el S25, incluidos el primer nivel, acciones y guardar. Se instaló la APK de ese estado. Ver `evidence/FIRST_FRAME.md`.
 - 24-11: los mismos 17 escenarios vuelven a coincidir en Windows con los cambios actuales. Compiló el ejecutable ARM64 y pasaron 16 escenarios en el S25. Durante el último, `save`, desapareció el S25 de ADB; quedaron pendientes esa ejecución y la confirmación de limpieza de su directorio temporal.
 - 24-11: 54 comprobaciones sintéticas de persistencia pasaron tanto en Windows como en el S25, con reapertura, reemplazo, archivos vacíos y fallos; limpieza confirmada.

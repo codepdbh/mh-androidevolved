@@ -2082,7 +2082,8 @@ def launch_game_on_s25():
     launch_diagnostic_on_s25()
     inspect_diagnostic_ui_on_s25()   # verifies the foreground package before interpreting its UI
     root=ET.fromstring((ROOT/'logs/diagnostic-ui-inspect.stdout.log').read_text(encoding='utf-8'))
-    buttons=[node for node in root.iter('node') if node.get('text','').startswith('Jugar') and
+    # The button style renders its label in capitals ("JUGAR · ..."), so compare case-insensitively.
+    buttons=[node for node in root.iter('node') if node.get('text','').upper().startswith('JUGAR') and
              node.get('clickable')=='true' and node.get('enabled')=='true']
     if len(buttons)!=1:raise WorkSafeError('need one visible enabled Play button')
     bounds=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',buttons[0].get('bounds',''))
