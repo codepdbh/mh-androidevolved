@@ -1695,7 +1695,7 @@ def _run_binary_on_s25(binary,label,args='',max_size=4*1024*1024,timeout=180,env
     import base64,hashlib,re,secrets,textwrap
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
-    if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or args not in ('','"$d"','/sdcard/mh-androidevolved/manhunt.exe','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved') or max_size>32*1024*1024:raise WorkSafeError('invalid device run parameters')
+    if not re.fullmatch(r'[a-z0-9-]{1,32}',label) or args not in ('','"$d"','/sdcard/mh-androidevolved/manhunt.exe','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved') or max_size>64*1024*1024:raise WorkSafeError('invalid device run parameters')
     env=env or {};saves=saves or {}
     if len(saves)>8 or any(not re.fullmatch(r'[a-z0-9][a-z0-9_. ]{0,63}',n) or len(d)>1024*1024 for n,d in saves.items()):raise WorkSafeError('invalid device saves')
     if any(not re.fullmatch(r'MH_[A-Z_]{1,24}',k) or not re.fullmatch(r'[0-9a-f:,]{0,1024}',v) for k,v in env.items()):raise WorkSafeError('invalid device environment')
@@ -1902,7 +1902,7 @@ def test_winmain(on_device=True,calls=False):
             unchanged()
             if hashlib.sha256(binary.read_bytes()).hexdigest()!=binary_hash:raise WorkSafeError('winmain binary changed during validation')
             try:
-                output=_run_binary_on_s25(binary.read_bytes(),'winmain','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved',max_size=32*1024*1024,timeout=1800,env=replay(reference),saves=seeds(reference))
+                output=_run_binary_on_s25(binary.read_bytes(),'winmain','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved',max_size=64*1024*1024,timeout=1800,env=replay(reference),saves=seeds(reference))
             except WorkSafeError:
                 attempt=ROOT/'logs/device-winmain-attempt.json'
                 if attempt.is_file():checkpoint['cleanup_attempt']=json.loads(attempt.read_text(encoding='utf-8'))
@@ -1979,7 +1979,7 @@ def resume_winmain_on_s25():
             env['MH_SAVES']='1';saves={p.name:p.read_bytes() for p in sorted((base/'seed_saves').glob('*'))}
         try:
             output=_run_binary_on_s25(binary.read_bytes(),'winmain','/sdcard/mh-androidevolved/manhunt.exe /sdcard/mh-androidevolved',
-                        max_size=32*1024*1024,timeout=1800,env=env,saves=saves)
+                        max_size=64*1024*1024,timeout=1800,env=env,saves=saves)
         except WorkSafeError:
             attempt=ROOT/'logs/device-winmain-attempt.json'
             if attempt.is_file():record['cleanup_attempt']=json.loads(attempt.read_text(encoding='utf-8'))

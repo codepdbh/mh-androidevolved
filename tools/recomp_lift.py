@@ -175,7 +175,7 @@ def _tools():
         Disassembler.jump_table_targets=bounded;Disassembler._mh_bounded=True
     return analyze_pe,build_iat_map,Disassembler,Lifter
 
-def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_code_pointers=False,auto_stop=False,x87=False,provided=(),dispatch_slots=()):
+def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_code_pointers=False,auto_stop=False,x87=False,provided=(),dispatch_slots=(),extra_roots=()):
     data=GAME.read_bytes()
     if hashlib.sha256(data).hexdigest()!=EXPECTED:raise SystemExit('unexpected executable hash')
     if (PCRECOMP/'REVISION.txt').read_text(encoding='ascii').strip()!=REVISION:raise SystemExit('unexpected tool revision')
@@ -193,7 +193,10 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
         if slot not in names:raise SystemExit(f'{slot:#x} is not an import slot')
     analyze_pe,build_iat_map,Disassembler,Lifter=_tools()
     info=analyze_pe(str(GAME));iat=build_iat_map(info);dis=Disassembler(data,info.image_base,info.sections)
-    order=[];pending=list(roots);graph={};pointers=set();thunks={}
+    # extra_roots: optional entries (e.g. function pointers found in data tables). Unlike roots,
+    # one that is not a decodable function or fails the audit becomes a stop instead of an error.
+    extra=set(extra_roots)-set(roots)
+    order=[];pending=list(roots)+sorted(extra);graph={};pointers=set();thunks={}
     text=[x for x in pe.sections if x.Name.rstrip(b'\0')==b'.text'][0];text_start=base+text.VirtualAddress;text_end=text_start+text.Misc_VirtualSize
     while pending:
         address=pending.pop(0)
@@ -206,7 +209,9 @@ def lift_closure(roots,stop,imports,name,max_functions=64,indirect=False,follow_
             if target!=address and text_start<=target<text_end:
                 thunks[address]=(target,entry[0]);graph[address]=None;order.append(address);pending.append(target);continue
         func=dis.disassemble_function(address,iat)
-        if not func:raise SystemExit(f'no function at {address:#x}')
+        if not func:
+            if address in extra:continue
+            raise SystemExit(f'no function at {address:#x}')
         graph[address]=func;order.append(address)
         if len(order)>max_functions:raise SystemExit('closure larger than allowed; add stop points')
         pending.extend(sorted(func.calls_to))
