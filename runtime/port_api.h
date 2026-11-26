@@ -98,6 +98,10 @@ uint32_t mh_port_fvf(mh_port *port);
 int mh_port_texture(mh_port *port, uint32_t stage, mh_port_texture_info *info);
 int mh_port_stream(mh_port *port, uint32_t stream, uint32_t *memory, uint32_t *length, uint32_t *stride);
 int mh_port_indices(mh_port *port, uint32_t *memory, uint32_t *length, uint32_t *format, uint32_t *base_vertex);
+/* The contents version of the bound vertex buffer of `stream` / index buffer: it changes at every
+ * Unlock (unique across reuse of the memory), so a renderer can keep a copy until it changes. */
+uint32_t mh_port_stream_version(mh_port *port, uint32_t stream);
+uint32_t mh_port_indices_version(mh_port *port);
 
 /* Counters for the comparison with the reference. */
 uint64_t mh_port_clock(const mh_port *port);

@@ -13,13 +13,16 @@
 extern mh_guest_memory mh_recomp_region;
 void mh_guest_fault(uint32_t address, size_t width);
 
+/* The same check as mh_mem_span (runtime/guest_memory.c), inline: every guest load and store
+ * goes through here, and an out-of-line call per access was most of the translated code's time. */
 static inline void *mh_recomp_access(uint32_t address, size_t width) {
-    uint8_t *p = mh_mem_span(&mh_recomp_region, address, width);
-    if (!p) {
+    const mh_guest_memory *m = &mh_recomp_region;
+    size_t start = (size_t)((uint64_t)address - m->guest_base);
+    if (!width || !m->bytes || address < m->guest_base || start > m->size || width > m->size - start) {
         mh_guest_fault(address, width);
         abort(); /* A fault handler must not return. */
     }
-    return p;
+    return m->bytes + start;
 }
 
 /* Guest x86 allows unaligned loads. Packed members make that property visible
@@ -48,12 +51,20 @@ typedef struct MH_ALIAS { double value; } mh_packed_double;
 #undef MEMF
 #undef MEMD
 #undef POP32_VAL
-#define MEM8(a) (*(volatile uint8_t *)mh_recomp_access((uint32_t)(a),1))
-#define MEM16(a) (((volatile mh_packed_u16 *)mh_recomp_access((uint32_t)(a),2))->value)
-#define MEM32(a) (((volatile mh_packed_u32 *)mh_recomp_access((uint32_t)(a),4))->value)
-#define MEM64(a) (((volatile mh_packed_u64 *)mh_recomp_access((uint32_t)(a),8))->value)
-#define MEMF(a) (((volatile mh_packed_float *)mh_recomp_access((uint32_t)(a),4))->value)
-#define MEMD(a) (((volatile mh_packed_double *)mh_recomp_access((uint32_t)(a),8))->value)
+/* Guest memory is not volatile: the guest runs on one host thread and every host call (imports,
+ * dispatch) is an opaque call the compiler must reload around, so it may keep values in registers
+ * between accesses. Define MH_RECOMP_VOLATILE_MEMORY to get the upstream volatile accesses back. */
+#ifdef MH_RECOMP_VOLATILE_MEMORY
+#define MH_RECOMP_V volatile
+#else
+#define MH_RECOMP_V
+#endif
+#define MEM8(a) (*(MH_RECOMP_V uint8_t *)mh_recomp_access((uint32_t)(a),1))
+#define MEM16(a) (((MH_RECOMP_V mh_packed_u16 *)mh_recomp_access((uint32_t)(a),2))->value)
+#define MEM32(a) (((MH_RECOMP_V mh_packed_u32 *)mh_recomp_access((uint32_t)(a),4))->value)
+#define MEM64(a) (((MH_RECOMP_V mh_packed_u64 *)mh_recomp_access((uint32_t)(a),8))->value)
+#define MEMF(a) (((MH_RECOMP_V mh_packed_float *)mh_recomp_access((uint32_t)(a),4))->value)
+#define MEMD(a) (((MH_RECOMP_V mh_packed_double *)mh_recomp_access((uint32_t)(a),8))->value)
 static inline uint32_t mh_recomp_pop32(uint32_t *sp) {
     uint32_t value=MEM32(*sp); *sp+=4; return value;
 }

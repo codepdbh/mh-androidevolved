@@ -1813,6 +1813,19 @@ int mh_port_stream(mh_port *P, uint32_t stream, uint32_t *memory, uint32_t *leng
     }
     return 0;
 }
+uint32_t mh_port_stream_version(mh_port *P, uint32_t stream) {
+    if (!P->device) return 0;
+    for (unsigned i = 0; i < P->device->nstreams; i++) if (P->device->streams[i].stream == stream) {
+        com_obj *b = object(P, P->device->streams[i].buffer);
+        return b && b->kind == K_VBUF ? b->version : 0;
+    }
+    return 0;
+}
+uint32_t mh_port_indices_version(mh_port *P) {
+    if (!P->device || !P->device->indices[0]) return 0;
+    com_obj *b = object(P, P->device->indices[0]);
+    return b && b->kind == K_IBUF ? b->version : 0;
+}
 int mh_port_indices(mh_port *P, uint32_t *memory, uint32_t *length, uint32_t *format, uint32_t *base_vertex) {
     if (!P->device || !P->device->indices[0]) return 0;
     com_obj *b = object(P, P->device->indices[0]);

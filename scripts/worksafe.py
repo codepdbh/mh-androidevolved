@@ -1459,8 +1459,14 @@ def build_game_library(prepare_only=False):
     ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     includes=[str(ROOT/'private/pcrecomp/runtime/recomp32'),str(ROOT/'recomp'),str(ROOT/'runtime'),str(base)]
     out=ROOT/'private/analysis/game/android';out.mkdir(parents=True,exist_ok=True);lib=out/'libmh_game.so'
+    # The app's own C (runtime, renderer, JNI) at -O2; the translated parts keep the validated -O1.
+    jni_obj=out/'game_jni.o'
+    built=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O2','-fPIC','-c',
+                    *[x for d in includes for x in ('-I',d)],str(ROOT/'android/app/src/main/cpp/game_jni.c'),'-o',str(jni_obj)],
+                   1800,'game-jni-build',cfg,max_processes=4,memory_mb=4096)
+    if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('game JNI build failed; inspect game-jni-build logs')
     built=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIC','-shared',
-                    *[x for d in includes for x in ('-I',d)],str(ROOT/'android/app/src/main/cpp/game_jni.c'),*map(str,_winmain_parts()),'-o',str(lib),
+                    *[x for d in includes for x in ('-I',d)],str(jni_obj),*map(str,_winmain_parts()),'-o',str(lib),
                     '-lGLESv3','-lEGL','-landroid','-llog','-laaudio','-lm','-Wl,-z,max-page-size=16384'],1800,'game-library-build',cfg,max_processes=4,memory_mb=6144)
     if built['returncode']!=0 or built['timed_out']:raise WorkSafeError('game library build failed; inspect game-library-build logs')
     if inputs!=_game_library_input_hashes() or winmain_inputs!=_winmain_input_hashes():
