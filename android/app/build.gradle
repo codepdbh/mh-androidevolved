@@ -2,7 +2,7 @@ plugins { id 'com.android.application' }
 android {
     namespace 'com.manhuntae.android'
     compileSdk 35
-    ndkVersion '28.2.13676358'
+    ndkVersion '29.0.14206865'
     defaultConfig {
         applicationId 'com.manhuntae.android'
         minSdk 29

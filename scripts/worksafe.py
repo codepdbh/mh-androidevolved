@@ -62,7 +62,7 @@ def check_android_guest_memory():
     if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
     free=available_memory_mb()
     if free < 1024: raise WorkSafeError(f'insufficient available RAM: {free} MiB')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe'; source=ROOT/'runtime'/'guest_memory.c'
     if not clang.is_file() or not source.is_file(): raise WorkSafeError('NDK 28.2 clang or guest memory source missing')
     output=ROOT/'build'/'android-native-check'; output.mkdir(parents=True,exist_ok=True)
@@ -75,7 +75,7 @@ def build_android_native_diagnostics():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536: raise WorkSafeError('insufficient available RAM for native link')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe'
     if not clang.is_file(): raise WorkSafeError('NDK clang missing')
     output=ROOT/'build'/'android-native-check';output.mkdir(parents=True,exist_ok=True)
@@ -92,7 +92,7 @@ def check_android_cmake():
     if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536: raise WorkSafeError('insufficient available RAM for CMake')
     sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'
-    ndk=sdk/'ndk'/'28.2.13676358'
+    ndk=sdk/'ndk'/'29.0.14206865'
     cmake=sdk/'cmake'/'3.22.1'/'bin'/'cmake.exe';ninja=sdk/'cmake'/'3.22.1'/'bin'/'ninja.exe'
     toolchain=ndk/'build'/'cmake'/'android.toolchain.cmake';output=ROOT/'build'/'android-cmake-check'
     if not all(p.is_file() for p in (cmake,ninja,toolchain)): raise WorkSafeError('CMake, Ninja or NDK toolchain missing')
@@ -118,7 +118,7 @@ def test_jni_diagnostics_host():
     def sha():
         with game.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
     if sha()!=expected:raise WorkSafeError('unexpected executable hash')
-    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk';ndk=sdk/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk';ndk=sdk/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     jni=ndk/'sysroot'/'usr'/'include'/'jni.h'
     vs=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'Microsoft Visual Studio'/'18'/'Community'/'VC'/'Tools'/'MSVC'/'14.51.36231'
     kits=Path(os.environ.get('ProgramFiles(x86)',r'C:\Program Files (x86)'))/'Windows Kits'/'10';sdkver='10.0.26100.0';link=vs/'bin'/'Hostx64'/'x64'/'link.exe';cl=link.parent/'cl.exe'
@@ -144,7 +144,7 @@ def test_guest_memory_wasm():
     if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
     free=available_memory_mb()
     if free < 1024: raise WorkSafeError(f'insufficient available RAM: {free} MiB')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe'
     node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
     if not clang.is_file() or not node.is_file(): raise WorkSafeError('NDK clang or Node missing')
@@ -161,7 +161,7 @@ def test_pe_image_wasm():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe';node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
     if not clang.is_file() or not node.is_file():raise WorkSafeError('NDK clang or Node missing')
     output=ROOT/'build'/'wasm-test';output.mkdir(parents=True,exist_ok=True)
@@ -177,7 +177,7 @@ def test_local_pe_mapping():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM for local PE mapping')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe';node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
     if not clang.is_file() or not node.is_file():raise WorkSafeError('NDK clang or Node missing')
     output=ROOT/'build'/'wasm-test';output.mkdir(parents=True,exist_ok=True)
@@ -334,7 +334,7 @@ def compile_time_loader_low_memory():
     report=json.loads((folder/'loader_report.json').read_text());source=(folder/'dep_00605750_precise.c').read_text(encoding='utf-8').removesuffix('\n')
     if report['address']!='0x605750' or hashlib.sha256(source.encode()).hexdigest()!=report['adapted_sha256']:raise WorkSafeError('bounded candidate source changed')
     unit=folder/'loader_checked_unit.c';unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     output=folder/'loader-checked-arm64.o'
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(output)]
@@ -360,7 +360,7 @@ def compile_time_free_wrapper_low_memory():
     if not operations.issubset({'MEM32','PUSH32','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported wrapper operations')
     unit=folder/'free_wrapper_unit.c'
     unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(folder/'free-wrapper-arm64.o')]
     result=_run_job(argv,30,'time-free-wrapper-compile',cfg,max_processes=1,memory_mb=128)
@@ -403,7 +403,7 @@ def test_time_loader_helpers_low_memory():
         if hashlib.sha256(source.encode()).hexdigest()!=item['adapted_sha256']:raise WorkSafeError('helper source hash mismatch')
         sources.append(source)
     unit=folder/'loader_helpers_unit.c';unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+'\n'.join(sources)+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     obj=folder/'loader-helpers-arm64.o';includes=[ROOT/'private/pcrecomp/runtime/recomp32',ROOT/'recomp',ROOT/'runtime']
     args=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11',*[a for p in includes for a in ('-I',str(p))],'-c',str(unit),'-o',str(obj)]
@@ -436,7 +436,7 @@ def run_time_loader_helpers_s25():
     if available_memory_mb()<1024:raise WorkSafeError('insufficient RAM for helper ARM64 link')
     folder=ROOT/'private/analysis/candidate_time/dependencies';entry=ROOT/'tests/time_loader_helpers_native.c'
     sources=_time_harness_input_hashes(entry)
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64'
     clang=ndk/'bin/clang.exe';adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
     if not clang.is_file() or not adb.is_file():raise WorkSafeError('Android tools missing')
     binary_path=folder/'loader-helpers-device-test'
@@ -499,7 +499,7 @@ def run_real_readonly_stream_s25(with_handles=False,build_only=False):
     expected='#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+'\n'.join(parts)+'\n'
     if (folder/'loader_helpers_unit.c').read_text(encoding='utf-8')!=expected:raise WorkSafeError('helper unit changed; rebuild helpers first')
     sources=_time_harness_input_hashes(entry)
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64'
     clang=ndk/'bin/clang.exe';adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
     if not clang.is_file() or not adb.is_file():raise WorkSafeError('Android tools missing')
     binary_path=folder/(label+'-device-test')
@@ -559,7 +559,7 @@ def check_readonly_stream_arm64(component='stream'):
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if component not in ('stream','handles','path'):raise WorkSafeError('unknown read-only component')
     if available_memory_mb()<512:raise WorkSafeError('insufficient RAM for backend compilation')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64'
     clang=ndk/'bin/clang.exe';out=ROOT/'build/android-native-check';out.mkdir(parents=True,exist_ok=True)
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     args=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'runtime'),'-c',str(ROOT/'runtime'/('readonly_'+component+'.c')),'-o',str(out/('readonly_'+component+'.o'))]
@@ -691,7 +691,7 @@ def compile_checked_time_indirect():
     if not operations.issubset({'MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported indirect operations: '+str(sorted(operations)))
     unit=folder/'indirect_checked_unit.c'
     unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_00401030(void);\nvoid sub_004932F0(void);\nvoid sub_00493230(void);\n'+source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(folder/'indirect-checked-arm64.o')]
     built=_run_job(argv,60,'time-indirect-checked-build',cfg,max_processes=1,memory_mb=384)
@@ -839,7 +839,7 @@ def build_time_candidate_arm64_test():
     prepared=compile_checked_time_candidate();copy_prepared=prepare_time_copy_precise();indirect_prepared=prepare_time_indirect_precise();lift_time_branch_dependency();lift_time_memcpy_dependency();lift_time_stack_probe();lift_time_x87_dependency()
     lift_time_free_wrapper_low_memory()
     base,out=_time_arm64_paths();_check_time_harness_sources(base)
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     out.parent.mkdir(parents=True,exist_ok=True)
     source_inputs=_time_harness_input_hashes()
@@ -1014,7 +1014,7 @@ def build_android_device_tests():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     out=ROOT/'build'/'device-tests';out.mkdir(parents=True,exist_ok=True)
     common=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-fPIE','-pie','-Wall','-Wextra','-Werror','-I',str(ROOT/'runtime')]
@@ -1036,7 +1036,7 @@ def build_android_dispatch_test():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     out=ROOT/'build'/'device-tests';out.mkdir(parents=True,exist_ok=True)
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-fPIE','-pie','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),str(ROOT/'tests/test_checked_dispatch.c'),str(ROOT/'runtime/win_tick.c'),str(ROOT/'runtime/android_boot_clock.c'),'-o',str(out/'dispatch_test')]
@@ -1307,7 +1307,7 @@ def test_import_registry():
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
     sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'
-    clang=sdk/'ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe'
+    clang=sdk/'ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe'
     node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs/node.exe'
     if not clang.is_file() or not node.is_file():raise WorkSafeError('test tools missing')
     out=ROOT/'build/wasm-test';out.mkdir(parents=True,exist_ok=True);binary=out/'import_registry.wasm'
@@ -1324,7 +1324,7 @@ def check_android_boot_clock():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64'
     clang=ndk/'bin/clang.exe';out=ROOT/'build/android-native-check';out.mkdir(parents=True,exist_ok=True)
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'runtime'),'-c',str(ROOT/'runtime/android_boot_clock.c'),'-o',str(out/'android_boot_clock.o')]
@@ -1338,7 +1338,7 @@ def test_import_registry_on_s25():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1536:raise WorkSafeError('insufficient available RAM')
-    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk';ndk=sdk/'ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    sdk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk';ndk=sdk/'ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64'
     clang=ndk/'bin/clang.exe';adb=sdk/'platform-tools/adb.exe'
     if not clang.is_file() or not adb.is_file():raise WorkSafeError('Android build tools missing')
     out=ROOT/'build/device-tests';out.mkdir(parents=True,exist_ok=True)
@@ -1456,7 +1456,7 @@ def build_game_library(prepare_only=False):
     validation_hash=hashlib.sha256(validation.read_bytes()).hexdigest() if validation else None
     winmain_inputs=_winmain_input_hashes()
     inputs=_game_library_input_hashes()
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     includes=[str(ROOT/'private/pcrecomp/runtime/recomp32'),str(ROOT/'recomp'),str(ROOT/'runtime'),str(base)]
     out=ROOT/'private/analysis/game/android';out.mkdir(parents=True,exist_ok=True);lib=out/'libmh_game.so'
     built=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIC','-shared',
@@ -1624,7 +1624,7 @@ def run_loader_on_s25():
             *(ROOT/'runtime'/n for n in ('guest_memory.c','guest_memory.h','readonly_stream.c','readonly_stream.h','readonly_path.c','readonly_path.h','readonly_handles.c','readonly_handles.h')),
             ROOT/'recomp/checked_memory_adapter.h',ROOT/'recomp/checked_dispatch_adapter.h',ROOT/'private/pcrecomp/runtime/recomp32/recomp_types.h']
     manifest={str(p.relative_to(ROOT)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     adb=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/platform-tools/adb.exe'
     if not clang.is_file() or not adb.is_file():raise WorkSafeError('NDK clang or adb missing')
     out=ROOT/'private/analysis/loader/android';out.mkdir(parents=True,exist_ok=True);binary_path=out/'loader_test'
@@ -1780,7 +1780,7 @@ def test_allocator(on_device=True):
     results={'windows-x64':Path(host['log']+'.stdout.log').read_text(encoding='utf-8',errors='replace').strip() if host['returncode']==0 else 'MISMATCH'}
     if host['returncode']!=0:raise WorkSafeError('allocator differs on Windows x64; inspect allocator-host-compare logs')
     if on_device:
-        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
         out=base/'android';out.mkdir(exist_ok=True);binary=out/'allocator_test'
         arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',*includes,
                       str(ROOT/'tests/allocator_native.c'),'-o',str(binary)],180,'allocator-arm64-build',cfg,max_processes=4,memory_mb=768)
@@ -1821,7 +1821,7 @@ def _validate_unit_harness(name,source,runtime_sources=(),on_device=True,game_ar
         return text
     results={'windows-x64':compare(ran['log']+'.stdout.log','windows-x64')}
     if on_device:
-        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
         out=base/'android';out.mkdir(exist_ok=True);binary=out/f'{name}_test'
         arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIE','-pie',
                       *[x for d in includes for x in ('-I',d)],str(ROOT/source),'-o',str(binary),'-lm'],180,f'{name}-arm64-build',cfg,max_processes=4,memory_mb=768)
@@ -1885,7 +1885,7 @@ def test_winmain(on_device=True,calls=False):
         results[name+' windows-x64']=compare(reference,ran['log']+'.stdout.log','windows-x64',name)
     unchanged()
     if on_device:
-        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
         out=base/'android';out.mkdir(exist_ok=True);binary=out/'winmain_test'
         arm=_run_job([str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O1','-fPIE','-pie',
                       *[x for d in includes for x in ('-I',d)],str(ROOT/'tests/winmain_native.c'),*map(str,_winmain_parts()),'-o',str(binary),'-lm'],1800,'winmain-arm64-build',cfg,max_processes=4,memory_mb=6144)
@@ -2004,7 +2004,7 @@ def stage_save_load_candidates():
     if generated['returncode']!=0 or generated['timed_out']:raise WorkSafeError('save/load candidate generation failed')
     base=ROOT/'private/analysis/save_load_candidates';entry=base/'compile_only.c'
     inputs=_time_harness_input_hashes(entry,include_dirs=(base,))
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64'
     includes=[ROOT/'private/pcrecomp/runtime/recomp32',ROOT/'recomp',ROOT/'runtime',base];obj=base/'save_load_candidates.o'
     built=_run_job([str(ndk/'bin/clang.exe'),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-O0','-fPIC','-c',
                     *[x for p in includes for x in ('-I',str(p))],str(entry),'-o',str(obj)],90,'save-load-arm64-object',cfg,max_processes=4,memory_mb=768)
@@ -2138,7 +2138,7 @@ def link_graphics_candidates():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True: raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1024: raise WorkSafeError('insufficient available RAM')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     linker=ndk/'bin'/'ld.lld.exe';base=ROOT/'private'/'analysis'
     one=base/'candidate_graphics'/'candidate-arm64.o';two=base/'d3d8_thunk'/'candidate-arm64.o'
     if not linker.is_file() or not one.is_file() or not two.is_file(): raise WorkSafeError('linker or candidate object missing')
@@ -2154,7 +2154,7 @@ def link_input_candidates():
     cfg=json.loads((ROOT/'config/work_safe.json').read_text(encoding='utf-8'))
     if cfg.get('enabled') is not True:raise WorkSafeError('work-safe mode required')
     if available_memory_mb()<1024:raise WorkSafeError('insufficient available RAM')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';linker=ndk/'bin'/'ld.lld.exe';base=ROOT/'private'/'analysis'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';linker=ndk/'bin'/'ld.lld.exe';base=ROOT/'private'/'analysis'
     one=base/'candidate_input'/'candidate-arm64.o';two=base/'dinput8_thunk'/'candidate-arm64.o'
     if not linker.is_file() or not one.is_file() or not two.is_file():raise WorkSafeError('linker or candidate object missing')
     output=base/'candidate_input'/'input-with-thunk-arm64.o'
@@ -2181,7 +2181,7 @@ def compile_checked_graphics_arm64():
         sources.append(source)
     folder=base/'candidate_graphics';wrapper=folder/'graphics_checked_unit.c'
     wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_0064408C(void);\n'+'\n'.join(sources)+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(folder/'graphics-checked-arm64.o')]
     built=_run_job(argv,60,'pcrecomp-graphics-checked-build',cfg,max_processes=1,memory_mb=384)
@@ -2203,7 +2203,7 @@ def compile_precise_graphics_arm64():
     if hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['adapted_sha256'] or hashlib.sha256(t_source.encode('utf-8')).hexdigest()!=t_report['source_sha256']:raise WorkSafeError('source hash mismatch')
     wrapper=folder/'graphics_precise_unit.c'
     wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_0064408C(void);\n'+source+'\n'+t_source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(folder/'graphics-precise-arm64.o')]
     built=_run_job(argv,60,'graphics-precise-arm64',cfg,max_processes=1,memory_mb=384)
@@ -2226,7 +2226,7 @@ def compile_precise_input_arm64():
     wrapper=folder/'input_precise_unit.c'
     prefix='#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\nvoid sub_00644098(void);\nvoid sub_0060F110(void);\n'
     wrapper.write_text(prefix+source+'\n'+t_source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64';clang=ndk/'bin'/'clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(folder/'input-precise-arm64.o')]
     built=_run_job(argv,60,'input-precise-arm64',cfg,max_processes=1,memory_mb=384)
@@ -2251,7 +2251,7 @@ def compile_game_candidate(kind='candidate'):
                ('void sub_00644098(void);\nvoid sub_0060F110(void);\n' if kind=='candidate_input' else
                 ('void sub_00426EF0(void);\nvoid sub_00481330(void);\nvoid sub_00481340(void);\nvoid sub_005DAA20(void);\nvoid sub_005DAA50(void);\nvoid sub_00604D20(void);\nvoid sub_00605750(void);\nvoid sub_00608410(void);\nvoid sub_00648540(void);\n' if kind=='candidate_time' else '')))
     wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n'+prototype+source,encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe'
     if not clang.is_file(): raise WorkSafeError('NDK clang not found')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-c',str(wrapper),'-o',str(base/'candidate-arm64.o')]
@@ -2284,7 +2284,7 @@ def compile_checked_time_candidate():
     if not used.issubset(allowed):raise WorkSafeError('unsupported operations: '+str(sorted(used-allowed)))
     prototypes=''.join('void sub_'+name+'(void);\n' for name in ('00426EF0','00481330','00481340','005DAA20','005DAA50','00604D20','00605750','00608410','00648540'))
     unit=base/'time_checked_unit.c';unit.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n#include "checked_dispatch_adapter.h"\n'+prototypes+source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(base/'time-checked-arm64.o')]
     built=_run_job(argv,60,'time-checked-build',cfg,max_processes=1,memory_mb=384)
@@ -2333,7 +2333,7 @@ def compile_time_with_small_dependencies(include_copy=False,include_indirect=Fal
         if not operations.issubset({'MEM32','PUSH32','POP32_VAL','RECOMP_ENTER','RECOMP_FLAGS_IN','RECOMP_FLAGS_OUT'}):raise WorkSafeError('unsupported indirect operations')
         sources.append('void sub_00401030(void);\nvoid sub_004932F0(void);\nvoid sub_00493230(void);\n'+indirect)
     unit=base/('time_all_unit.c' if include_indirect else ('time_copy_linked_unit.c' if include_copy else 'time_linked_unit.c'));unit.write_text((base/'time_checked_unit.c').read_text(encoding='utf-8')+'\n'+'\n'.join(sources)+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64';clang=ndk/'bin/clang.exe'
     if not clang.is_file():raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private/pcrecomp/runtime/recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(unit),'-o',str(base/('time-all-arm64.o' if include_indirect else ('time-copy-linked-arm64.o' if include_copy else 'time-linked-arm64.o')))]
     built=_run_job(argv,60,'time-small-deps-build',cfg,max_processes=1,memory_mb=384)
@@ -2357,7 +2357,7 @@ def compile_checked_candidate_arm64():
         raise WorkSafeError('unsupported memory form')
     wrapper=base/'checked_translation_unit.c'
     wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n'+source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe'
     if not clang.is_file(): raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(base/'candidate-checked-arm64.o')]
@@ -2377,7 +2377,7 @@ def prepare_compile_x87_checked():
     if hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['adapted_sha256']: raise WorkSafeError('adapted source hash mismatch')
     wrapper=base/'checked_translation_unit.c'
     wrapper.write_text('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "checked_memory_adapter.h"\n'+source+'\n',encoding='utf-8')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe'
     if not clang.is_file(): raise WorkSafeError('NDK clang missing')
     argv=[str(clang),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),'-std=gnu11','-I',str(ROOT/'private'/'pcrecomp'/'runtime'/'recomp32'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'runtime'),'-c',str(wrapper),'-o',str(base/'candidate-checked-arm64.o')]
@@ -2412,7 +2412,7 @@ def compare_candidate_wasm():
     source=(base/'candidate.c').read_text(encoding='utf-8').removesuffix('\n')
     if report['address']!='0x40a020' or hashlib.sha256(source.encode('utf-8')).hexdigest()!=report['source_sha256']:
         raise WorkSafeError('unexpected candidate')
-    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'28.2.13676358'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
+    ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk'/'ndk'/'29.0.14206865'/'toolchains'/'llvm'/'prebuilt'/'windows-x86_64'
     clang=ndk/'bin'/'clang.exe'; node=Path(os.environ.get('ProgramFiles',r'C:\Program Files'))/'nodejs'/'node.exe'
     if not clang.is_file() or not node.is_file(): raise WorkSafeError('NDK clang or Node missing')
     argv=[str(clang),'--target=wasm32-unknown-unknown','-ffreestanding','-fno-builtin','-fno-strict-aliasing','-nostdlib','-std=c11','-I',str(base),str(ROOT/'tests'/'candidate_wasm_harness.c'),'-Wl,--no-entry','-Wl,--export=run_case','-Wl,--export=get_result','-Wl,--export=get_reg','-Wl,--export=get_flags','-Wl,--export=get_guest_memory','-Wl,--export-memory','-o',str(base/'difftest.wasm')]
@@ -2571,7 +2571,7 @@ def test_port_saves(on_device=True):
     data.rmdir()
     results={'windows-x64':Path(ran['log']+'.stdout.log').read_text(encoding='utf-8').strip()}
     if on_device:
-        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64'
+        ndk=Path(os.environ.get('LOCALAPPDATA',''))/'Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64'
         binary=out/'port_saves_test'
         arm=_run_job([str(ndk/'bin/clang.exe'),'--target=aarch64-linux-android29','--sysroot='+str(ndk/'sysroot'),
                       '-std=gnu11','-O1','-fPIE','-pie','-I',str(ROOT/'runtime'),*[str(ROOT/s) for s in sources],'-o',str(binary),'-lm'],
