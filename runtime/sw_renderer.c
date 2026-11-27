@@ -196,7 +196,19 @@ static void on_present(void *user, mh_port *port, unsigned frame) {
     mh_sw_renderer *r = user;
     if (!ensure(r, port)) return;
     if (r->log) fprintf(r->log, "present %u (%ux%u)\n", frame, r->width, r->height);
-    if (r->png[0] && frame >= r->png_from) { char path[600]; snprintf(path, sizeof path, r->png, frame); mh_write_png(path, r->bcolor, r->bw, r->bh); }
+    uint16_t ramp[768]; int gamma = mh_port_gamma_ramp(port, ramp);
+    if (r->log && gamma && frame >= r->png_from)
+        fprintf(r->log, "  gamma ramp r[0,64,128,192,255]=%u,%u,%u,%u,%u g[128]=%u b[128]=%u\n", ramp[0] >> 8, ramp[64] >> 8, ramp[128] >> 8, ramp[192] >> 8, ramp[255] >> 8, ramp[384] >> 8, ramp[640] >> 8);
+    if (r->png[0] && frame >= r->png_from) {
+        char path[600]; snprintf(path, sizeof path, r->png, frame);
+        if (gamma) {   /* the image as displayed: through the game's gamma ramp */
+            size_t n = (size_t)r->bw * r->bh; uint8_t *img = malloc(n * 4);
+            if (img) {
+                for (size_t i = 0; i < n; i++) for (int c = 0; c < 4; c++) img[4 * i + c] = c < 3 ? (uint8_t)(ramp[256 * c + r->bcolor[4 * i + c]] >> 8) : r->bcolor[4 * i + c];
+                mh_write_png(path, img, r->bw, r->bh); free(img);
+            }
+        } else mh_write_png(path, r->bcolor, r->bw, r->bh);
+    }
 }
 
 /* ------------------------------------------------------------------ lifetime */

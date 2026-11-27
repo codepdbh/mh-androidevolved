@@ -106,6 +106,8 @@ int mh_port_indices(mh_port *port, uint32_t *memory, uint32_t *length, uint32_t 
 /* Movies: decode Bink video into the buffers the game copies (the app; off by default, where
  * they stay zero as in the x86 reference the translated runs are compared with). */
 void mh_port_set_video_decode(mh_port *port, int on);
+/* The device's gamma ramp (D3DGAMMARAMP: red, green, blue, 256 words each) once the game set one. */
+int mh_port_gamma_ramp(mh_port *port, uint16_t out[768]);
 uint32_t mh_port_stream_version(mh_port *port, uint32_t stream);
 uint32_t mh_port_indices_version(mh_port *port);
 

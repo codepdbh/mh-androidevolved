@@ -36,6 +36,9 @@ struct mh_gles_renderer {
     GLint u_wvp, u_world, u_vp, u_zk, u_light, u_nlights, u_lights, u_mat, u_ambient, u_csel;
     GLint u_wv, u_tm0, u_tm1, u_tci, u_ttff;
     gl_buffer buffers[2048]; unsigned nbuffers;
+    /* Present with the game's gamma ramp (SetGammaRamp): the back buffer is a texture, drawn to the
+     * window through a 256-entry lookup per channel. */
+    GLuint present_prog, present_vao, gamma_tex; GLint u_src, u_lut; uint16_t gamma[768]; int gamma_on;
 };
 
 static const char *VERTEX =
@@ -131,6 +134,14 @@ static void frag_locs(GLuint p, frag_loc *L) {
     L->tex1 = glGetUniformLocation(p, "u_tex1"); L->has_tex1 = glGetUniformLocation(p, "u_has_tex1"); L->flip1 = glGetUniformLocation(p, "u_flip1");
     L->s1color = glGetUniformLocation(p, "u_s1color"); L->s1alpha = glGetUniformLocation(p, "u_s1alpha");
 }
+static const char *PRESENT_VS =
+    "#version 300 es\n"
+    "out vec2 v; void main(){ vec2 p = vec2(float((gl_VertexID & 1) * 2), float((gl_VertexID >> 1) * 2)); v = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+static const char *PRESENT_FS =
+    "#version 300 es\nprecision highp float;\n"
+    "in vec2 v; uniform sampler2D u_src; uniform sampler2D u_lut; out vec4 o;\n"
+    "void main(){ vec3 c = texture(u_src, v).rgb * (255.0 / 256.0) + 0.5 / 256.0;\n"
+    "  o = vec4(texture(u_lut, vec2(c.r, 0.5)).r, texture(u_lut, vec2(c.g, 0.5)).g, texture(u_lut, vec2(c.b, 0.5)).b, 1.0); }\n";
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type); glShaderSource(s, 1, &src, NULL); glCompileShader(s);
     GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -196,12 +207,14 @@ static int ensure(mh_gles_renderer *r, mh_port *port) {
     if (fw > 4096) fw = 4096; if (fh > 4096) fh = 4096; if (fw < 1) fw = 1; if (fh < 1) fh = 1;
     if (w != r->width || h != r->height || fw != r->fw || fh != r->fh) {
         flush(r);   /* the batch may target the framebuffer about to be replaced */
-        if (r->fbo) { glDeleteFramebuffers(1, &r->fbo); glDeleteRenderbuffers(1, &r->color); glDeleteRenderbuffers(1, &r->depth); }
-        glGenFramebuffers(1, &r->fbo); glGenRenderbuffers(1, &r->color); glGenRenderbuffers(1, &r->depth);
-        glBindRenderbuffer(GL_RENDERBUFFER, r->color); glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, fw, fh);
+        if (r->fbo) { glDeleteFramebuffers(1, &r->fbo); glDeleteTextures(1, &r->color); glDeleteRenderbuffers(1, &r->depth); }
+        glGenFramebuffers(1, &r->fbo); glGenTextures(1, &r->color); glGenRenderbuffers(1, &r->depth);
+        glBindTexture(GL_TEXTURE_2D, r->color); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fw, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glBindRenderbuffer(GL_RENDERBUFFER, r->depth); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, fw, fh);
         glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, r->color);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, r->color, 0);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, r->depth);
         r->width = w; r->height = h; r->fw = fw; r->fh = fh;
         glClearColor(0, 0, 0, 1); glClearDepthf(1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -254,6 +267,7 @@ static GLuint texture(mh_gles_renderer *r, const mh_port_texture_info *t) {
     uint8_t *rgba = mh_d3d_decode_texture(r->mem, t);
     glBindTexture(GL_TEXTURE_2D, e->id);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)e->width, (GLsizei)e->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glGenerateMipmap(GL_TEXTURE_2D);   /* distant surfaces are averaged as with Direct3D's mip levels */
     free(rgba);
     e->version = t->version[0];
     return e->id;
@@ -301,7 +315,7 @@ static void apply_state(mh_gles_renderer *r, const frag_loc *L, const mh_d3d_pix
     if (s->has_texture) {
         glBindTexture(GL_TEXTURE_2D, rt ? rt->tex : texture(r, &s->texture));
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s->mag_filter == 1 ? GL_NEAREST : GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, s->min_filter == 1 ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, rt ? (s->min_filter == 1 ? GL_NEAREST : GL_LINEAR) : s->min_filter == 1 ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(s->address_u)); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(s->address_v));
     }
     glUniform1i(L->tex, 0); glUniform1i(L->has_tex, s->has_texture);
@@ -367,7 +381,7 @@ static void apply_stage1(mh_gles_renderer *r, mh_port *port, const frag_loc *L) 
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, rt ? rt->tex : texture(r, &t));
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mh_port_stage_state(port, 1, 16) == 1 ? GL_NEAREST : GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mh_port_stage_state(port, 1, 17) == 1 ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, rt ? (mh_port_stage_state(port, 1, 17) == 1 ? GL_NEAREST : GL_LINEAR) : mh_port_stage_state(port, 1, 17) == 1 ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(mh_port_stage_state(port, 1, 13)));
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(mh_port_stage_state(port, 1, 14)));
         glActiveTexture(GL_TEXTURE0);
@@ -553,6 +567,39 @@ static void on_draw(void *user, mh_port *port, const mh_port_draw_call *call) {
     if (!r->pend_n) { r->pend_state = s; r->pend_fbo = r->cur_fbo; r->pend_vw = r->cur_vw; r->pend_vh = r->cur_vh; }
     r->pend_n += out;
 }
+/* Draws the back buffer to the window through the game's gamma ramp. 0 when there is none or it is
+ * the identity (the plain blit is used). */
+static int present_gamma(mh_gles_renderer *r, mh_port *port, int dx, int dy, int dw, int dh) {
+    uint16_t ramp[768];
+    if (!mh_port_gamma_ramp(port, ramp)) return 0;
+    if (memcmp(ramp, r->gamma, sizeof ramp) || !r->gamma_tex) {
+        memcpy(r->gamma, ramp, sizeof ramp); r->gamma_on = 0;
+        for (int i = 0; i < 256; i++) for (int c = 0; c < 3; c++) if (abs((int)(ramp[256 * c + i] >> 8) - i) > 1) r->gamma_on = 1;
+        if (!r->present_prog) {
+            GLuint vs = compile(GL_VERTEX_SHADER, PRESENT_VS), fs = compile(GL_FRAGMENT_SHADER, PRESENT_FS); GLint ok = 0;
+            if (!vs || !fs) return 0;
+            r->present_prog = glCreateProgram(); glAttachShader(r->present_prog, vs); glAttachShader(r->present_prog, fs); glLinkProgram(r->present_prog);
+            glGetProgramiv(r->present_prog, GL_LINK_STATUS, &ok); if (!ok) { glDeleteProgram(r->present_prog); r->present_prog = 0; return 0; }
+            r->u_src = glGetUniformLocation(r->present_prog, "u_src"); r->u_lut = glGetUniformLocation(r->present_prog, "u_lut");
+            glGenVertexArrays(1, &r->present_vao);
+        }
+        uint8_t lut[256 * 4];
+        for (int i = 0; i < 256; i++) { lut[4 * i] = (uint8_t)(ramp[i] >> 8); lut[4 * i + 1] = (uint8_t)(ramp[256 + i] >> 8); lut[4 * i + 2] = (uint8_t)(ramp[512 + i] >> 8); lut[4 * i + 3] = 255; }
+        if (!r->gamma_tex) glGenTextures(1, &r->gamma_tex);
+        glBindTexture(GL_TEXTURE_2D, r->gamma_tex); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, lut);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    if (!r->gamma_on || !r->present_prog) return 0;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(dx, dy, dw, dh);
+    glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDepthMask(GL_FALSE);
+    glUseProgram(r->present_prog); glBindVertexArray(r->present_vao);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, r->gamma_tex);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, r->color);
+    glUniform1i(r->u_src, 0); glUniform1i(r->u_lut, 1);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    return 1;
+}
 static void on_present(void *user, mh_port *port, unsigned frame) {
     mh_gles_renderer *r = user; (void)frame; flush(r);
     if (!ensure(r, port)) return;
@@ -565,7 +612,8 @@ static void on_present(void *user, mh_port *port, unsigned frame) {
     if (r->stretch == 2) { dh = (int)((long)ww * r->fh / r->fw); if (dh > wh) { dh = wh; dw = (int)((long)wh * r->fw / r->fh); } }
     else if (!r->stretch) { dh = (int)((long)ww * r->height / r->width); if (dh > wh) { dh = wh; dw = (int)((long)wh * r->width / r->height); } }
     int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
-    glBlitFramebuffer(0, 0, r->fw, r->fh, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, r->fw == dw && r->fh == dh ? GL_NEAREST : GL_LINEAR);
+    if (!present_gamma(r, port, dx, dy, dw, dh))
+        glBlitFramebuffer(0, 0, r->fw, r->fh, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, r->fw == dw && r->fh == dh ? GL_NEAREST : GL_LINEAR);
     r->swap(r->user);
     glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
 }
@@ -580,7 +628,8 @@ void mh_gles_renderer_destroy(mh_gles_renderer *r) {
     for (unsigned i = 0; i < r->ntextures; i++) glDeleteTextures(1, &r->textures[i].id);
     for (unsigned i = 0; i < r->nbuffers; i++) glDeleteBuffers(1, &r->buffers[i].id);
     if (r->program3d) { glDeleteProgram(r->program3d); glDeleteVertexArrays(1, &r->vao3d); glDeleteBuffers(1, &r->vbo_up); glDeleteBuffers(1, &r->ibo_up); }
-    if (r->fbo) { glDeleteFramebuffers(1, &r->fbo); glDeleteRenderbuffers(1, &r->color); glDeleteRenderbuffers(1, &r->depth); }
+    if (r->fbo) { glDeleteFramebuffers(1, &r->fbo); glDeleteTextures(1, &r->color); glDeleteRenderbuffers(1, &r->depth); }
+    if (r->present_prog) { glDeleteProgram(r->present_prog); glDeleteVertexArrays(1, &r->present_vao); glDeleteTextures(1, &r->gamma_tex); }
     if (r->program) { glDeleteProgram(r->program); glDeleteBuffers(1, &r->vbo); glDeleteVertexArrays(1, &r->vao); }
     free(r->pend); r->pend = NULL; r->pend_n = r->pend_cap = 0;
     free(r);

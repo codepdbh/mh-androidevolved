@@ -83,11 +83,19 @@ static void timed_draw(void *user, mh_port *port, const mh_port_draw_call *call)
         uint32_t tm = 0, tw = 0, th = 0, tf = 0; int into = mh_port_render_target(port, &tm, &tw, &th, &tf) && tw && th;
         int sample = s.has_texture && target_for(user, s.texture.memory[0]) != NULL, pre = (mh_port_fvf(port) & 0x00e) == 0x004;
         unsigned cat = (sample ? 1u : 0) | (into ? 2u : 0) | (s.fog_mode ? 4u : 0) | (s.blend && s.src_blend == 1 && s.dst_blend == 4 ? 8u : 0) | (pre ? 16u : 0);
+        mh_port_texture_info t1; int t1ok = mh_port_texture(port, 1, &t1); uint32_t lraw[8][26]; unsigned nl = mh_port_lights(port, lraw, 8);
+        uint32_t mraw[17]; float mf[17]; mh_port_material(port, mraw); memcpy(mf, mraw, sizeof mf);
         if (dbg_log_frame == 2)
-            __android_log_print(ANDROID_LOG_INFO, TAG, "draw kind=%d prim=%u n=%u fvf=%03x cat=%x rt=%08x tex=%08x %ux%u fmt=%08x op=%u(%x,%x) aop=%u blend=%d(%u,%u) atest=%d(%u,%u) z=%d/%d(%u) cull=%u fog=%u(%g,%g,%06x) addr=%u/%u",
+            __android_log_print(ANDROID_LOG_INFO, TAG, "draw kind=%d prim=%u n=%u fvf=%03x cat=%x rt=%08x tex=%08x %ux%u fmt=%08x op=%u(%x,%x) aop=%u blend=%d(%u,%u) atest=%d(%u,%u) z=%d/%d(%u) cull=%u fog=%u(%g,%g,%06x) addr=%u/%u s1=%u(%x,%x) a1=%u(%x,%x) tex1=%08x %ux%u fmt1=%08x tci=%x/%x ttff=%x/%x light=%u n=%u amb=%08x tf=%08x cv=%u src=%u/%u/%u mat=%.2f,%.2f,%.2f/%.2f,%.2f,%.2f/%.2f,%.2f,%.2f",
                 call->kind, call->primitive, call->args[1], mh_port_fvf(port), cat, tm, s.has_texture ? s.texture.memory[0] : 0, s.texture.level_width[0], s.texture.level_height[0], s.texture.format,
                 s.colorop, s.colorarg1, s.colorarg2, s.alphaop, s.blend, s.src_blend, s.dst_blend, s.alpha_test, s.alpha_func, s.alpha_ref, s.z_test, s.z_write, s.z_func, s.cull,
-                s.fog_mode, s.fog_start, s.fog_end, s.fog_color, s.address_u, s.address_v);
+                s.fog_mode, s.fog_start, s.fog_end, s.fog_color, s.address_u, s.address_v,
+                mh_port_stage_state(port, 1, 1), mh_port_stage_state(port, 1, 2), mh_port_stage_state(port, 1, 3), mh_port_stage_state(port, 1, 4), mh_port_stage_state(port, 1, 5), mh_port_stage_state(port, 1, 6),
+                t1ok ? t1.memory[0] : 0, t1ok ? t1.level_width[0] : 0, t1ok ? t1.level_height[0] : 0, t1ok ? t1.format : 0,
+                mh_port_stage_state(port, 0, 11), mh_port_stage_state(port, 1, 11), mh_port_stage_state(port, 0, 24), mh_port_stage_state(port, 1, 24),
+                mh_port_render_state(port, 137), nl, mh_port_render_state(port, 139), s.tfactor,
+                mh_port_render_state(port, 141), mh_port_render_state(port, 145), mh_port_render_state(port, 147), mh_port_render_state(port, 148),
+                mf[0], mf[1], mf[2], mf[4], mf[5], mf[6], mf[12], mf[13], mf[14]);
         if (dbg_skip & cat) return;
     }
     uint64_t t = now_us(); inner.draw(user, port, call); perf.draw += now_us() - t; perf.draws++;

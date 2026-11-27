@@ -124,6 +124,7 @@ struct mh_port {
     sample samples[64]; unsigned nsamples;
     bink binks[8]; unsigned nbinks;
     int video_decode;                          /* mh_port_set_video_decode */
+    uint16_t gamma[768]; int has_gamma;        /* the last SetGammaRamp (red, green, blue x 256), for the renderer */
 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -648,7 +649,11 @@ static uint32_t dv_display_mode(mh_port *P, com_obj *o, const uint32_t *a, int *
     write_mode(P, a[1], m); return D3D_OK;
 }
 static uint32_t dv_creation(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)h; const uint32_t v[4] = {0, 1, o->params.window, o->params.flags}; for (int k = 0; k < 4; k++) w32(P, a[1] + 4 * k, v[k]); return D3D_OK; }
-static uint32_t dv_gamma(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)o; uint8_t g[0x600]; if (!mh_mem_read(P->mem, a[2], g, sizeof g)) fail(P, "gamma ramp"); *h = 0; return 0; }
+static uint32_t dv_gamma(mh_port *P, com_obj *o, const uint32_t *a, int *h) {
+    (void)o; uint8_t g[0x600]; if (!mh_mem_read(P->mem, a[2], g, sizeof g)) fail(P, "gamma ramp");
+    for (int i = 0; i < 768; i++) P->gamma[i] = (uint16_t)(g[2 * i] | g[2 * i + 1] << 8);
+    P->has_gamma = 1; *h = 0; return 0;
+}
 static uint32_t dv_show_cursor(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)h; uint32_t old = o->cursor_shown; o->cursor_shown = a[1]; return old; }
 static uint32_t dv_cursor_pos(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)P; (void)o; (void)a; *h = 0; return 0; }
 static uint32_t dv_render_target(mh_port *P, com_obj *o, const uint32_t *a, int *h) { (void)h; w32(P, a[1], give(P, o->render_target)); return D3D_OK; }
@@ -1859,6 +1864,7 @@ int mh_port_stream(mh_port *P, uint32_t stream, uint32_t *memory, uint32_t *leng
     return 0;
 }
 void mh_port_set_video_decode(mh_port *P, int on) { P->video_decode = on != 0; }
+int mh_port_gamma_ramp(mh_port *P, uint16_t out[768]) { if (!P->has_gamma) return 0; memcpy(out, P->gamma, sizeof P->gamma); return 1; }
 uint32_t mh_port_stream_version(mh_port *P, uint32_t stream) {
     if (!P->device) return 0;
     for (unsigned i = 0; i < P->device->nstreams; i++) if (P->device->streams[i].stream == stream) {
