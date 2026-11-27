@@ -16,7 +16,8 @@ El port ejecuta el arranque, el menú, las cinemáticas del motor y el primer ni
     - En render targets se ajustan los bordes de píxel, para cubrir lo mismo a cualquier escala.
     - Las líneas y los puntos pretransformados se dibujan como quads de 1 píxel; así salen las líneas de la cámara.
 - **Audio**: Miles (IMA ADPCM con tablas exactas), mezclador y AAudio.
-- **Entrada y guardado**: controles táctiles; partidas guardadas en el almacenamiento privado de la app, separadas de los datos originales.
+- **Entrada y guardado**: controles táctiles con los iconos del proyecto (`assets/touch_hud`) y un editor de diseño (lápiz: mover, pellizcar para cambiar el tamaño, restaurar); partidas guardadas en el almacenamiento privado de la app, separadas de los datos originales.
+- **Curva gamma** (`SetGammaRamp`, el ajuste de BRILLO del juego) aplicada al presentar; mipmaps generados para las texturas del juego.
 - **Reloj**: virtual (determinista), o en tiempo real desde el launcher (opción experimental fuera de los recorridos validados).
 - **Diagnóstico** (`adb shell setprop`):
   - `debug.mh.skip`: omite categorías de dibujos.
