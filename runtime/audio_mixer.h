@@ -19,4 +19,7 @@ void mh_mixer_bind(mh_mixer *m, mh_port_audio *out);
 void mh_mixer_sound(mh_mixer *m, const mh_port_sound *sound, int event);
 void mh_mixer_render(mh_mixer *m, int16_t *out, unsigned frames);
 void mh_mixer_set_gain(mh_mixer *m, float gain);
+/* Movie sound: interleaved stereo 16-bit at `rate`, queued (about 8 s at most) and mixed in as it
+ * plays; pcm NULL drops what is queued. */
+void mh_mixer_movie(mh_mixer *m, const int16_t *pcm, unsigned frames, unsigned rate);
 #endif

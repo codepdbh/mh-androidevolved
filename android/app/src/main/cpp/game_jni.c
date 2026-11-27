@@ -161,6 +161,7 @@ static void on_ready(void *user, mh_port *port, mh_guest_memory *memory) {
     game_thread *g = user; (void)memory;
     if (mixer) { static mh_port_audio audio; mh_mixer_bind(mixer, &audio); mh_port_set_audio(port, &audio); start_audio(); }
     if (g->realtime) { mh_port_set_clock(port, now_ms, NULL); pace_realtime = 1; }
+    mh_port_set_video_decode(port, 1);   /* the movies are decoded in the app (they stay black in the compared runs) */
     memset(&perf, 0, sizeof perf); perf.frame0 = now_us(); perf.virt0 = mh_port_clock(port);
 }
 static int init_egl(game_thread *g) {

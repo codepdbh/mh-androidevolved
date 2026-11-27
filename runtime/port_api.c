@@ -4,6 +4,9 @@
 #include "win32_memory.h"
 #include "win32_thread.h"
 #include "win32_process.h"
+/* Bink 1 video (LGPL, derived from FFmpeg): decoded only when the app turns it on with
+ * mh_port_set_video_decode; otherwise the movie buffers stay zero, as in the x86 reference. */
+#include "bink_decoder.c"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,7 +79,7 @@ typedef struct {
     int released; uint32_t status, loops, info[9], offset, loop_block[2]; int has_info; uint64_t started;
     float volume; uint32_t playback_rate;   /* for the audio output only */
 } sample;
-typedef struct { uint32_t h, frames, rate, div; uint64_t start; char name[MAXPATH]; } bink;
+typedef struct { uint32_t h, frames, rate, div; uint64_t start; char name[MAXPATH]; mh_bink *dec; } bink;
 
 struct mh_port {
     mh_guest_memory *mem; mh_port_host host; char game_dir[MAXPATH]; unsigned frame_limit;
@@ -120,6 +123,7 @@ struct mh_port {
     struct { char name[128]; uint32_t v; } prefs3d[32]; unsigned nprefs3d; uint32_t room;
     sample samples[64]; unsigned nsamples;
     bink binks[8]; unsigned nbinks;
+    int video_decode;                          /* mh_port_set_video_decode */
 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -1649,7 +1653,9 @@ API(bink_open) {
     for (int i = 0; i < 7; i++) w32(P, handle + 4 * i, fields[i]);
     if (P->nbinks == 8) fail(P, "too many Bink movies");
     bink *b = &P->binks[P->nbinks++]; b->h = handle; b->frames = v[0]; b->rate = v[3]; b->div = v[4] ? v[4] : 1; b->start = P->clock;
-    snprintf(b->name, sizeof b->name, "%s", name); return handle;
+    snprintf(b->name, sizeof b->name, "%s", name);
+    b->dec = P->video_decode ? mh_bink_open(host) : NULL;
+    return handle;
 }
 API(bink_buffer_open) { (void)h; uint32_t buf = com_alloc(P, 0x100); const uint32_t v[4] = {a[1], a[2], a[1], a[2]}; for (int i = 0; i < 4; i++) w32(P, buf + 4 * i, v[i]); return buf; }
 API(bink_volume) { need_bink(P, a[0]); *h = 0; return 0; }
@@ -1658,11 +1664,27 @@ API(bink_wait) {
     int64_t due = (int64_t)b->start + floordiv((frame - 1) * 1000 * (int64_t)b->div, b->rate ? (int64_t)b->rate : 1);
     return (int64_t)P->clock < due ? 1 : 0;
 }
-API(bink_do_frame) { (void)h; need_bink(P, a[0]); return 0; }
+/* With video decoding on, the current frame is decoded here and its sound handed to the host. */
+API(bink_do_frame) {
+    (void)h; bink *b = need_bink(P, a[0]); uint32_t frame = r32(P, a[0] + 0xc);
+    if (b && b->dec && frame >= 1 && mh_bink_decode(b->dec, frame - 1)) {
+        const int16_t *pcm; unsigned rate; size_t n = mh_bink_take_audio(b->dec, &pcm, &rate);
+        if (n && P->has_audio && P->audio.movie) P->audio.movie(P->audio.user, P, pcm, (unsigned)n, rate);
+    }
+    return 0;
+}
 API(bink_copy) {
     (void)h; need_bink(P, a[0]); uint32_t dest = a[1], pitch = a[2], dest_h = a[3], dx = a[4], dy = a[5], sw = a[8], sh = a[9], flags = a[10], bpp;
     switch (flags & 0x1f) { case 3: case 4: bpp = 4; break; case 0xa: case 0xb: case 0xc: case 0xd: bpp = 2; break; default: fail(P, "BinkCopyToBufferRect surface type 0x%x", flags); return 0; }
     uint32_t rows = dest_h > dy ? (sh < dest_h - dy ? sh : dest_h - dy) : 0;
+    bink *b = need_bink(P, a[0]);
+    /* BINKSURFACE32 (B G R X), BINKSURFACE32R (R G B X), BINKSURFACE565 */
+    int fmt = (flags & 0x1f) == 3 ? 0 : (flags & 0x1f) == 4 ? 1 : (flags & 0x1f) == 0xa ? 2 : -1;
+    uint32_t frame = r32(P, a[0] + 0xc);
+    if (b && b->dec && fmt >= 0 && rows && frame >= 1 && mh_bink_decode(b->dec, frame - 1)) {
+        uint8_t *d = mh_mem_span(P->mem, dest + dy * pitch + dx * bpp, (size_t)(rows - 1) * pitch + (size_t)sw * bpp);
+        if (d) { mh_bink_copy(b->dec, d, pitch, a[6], a[7], sw, rows, fmt); return 0; }
+    }
     for (uint32_t r = 0; r < rows; r++) zero(P, dest + (dy + r) * pitch + dx * bpp, (size_t)sw * bpp);
     return 0;
 }
@@ -1670,7 +1692,7 @@ API(bink_next) {
     bink *b = need_bink(P, a[0]); uint32_t frame = r32(P, a[0] + 0xc); w32(P, a[0] + 0x10, frame);
     w32(P, a[0] + 0xc, frame < b->frames ? frame + 1 : 1); *h = 0; return 0;
 }
-API(bink_close) { need_bink(P, a[0]); for (unsigned i = 0; i < P->nbinks; i++) if (P->binks[i].h == a[0]) { memmove(&P->binks[i], &P->binks[i + 1], (P->nbinks - i - 1) * sizeof *P->binks); P->nbinks--; break; } *h = 0; return 0; }
+API(bink_close) { need_bink(P, a[0]); for (unsigned i = 0; i < P->nbinks; i++) if (P->binks[i].h == a[0]) { if (P->binks[i].dec && P->has_audio && P->audio.movie) P->audio.movie(P->audio.user, P, NULL, 0, 0); mh_bink_close(P->binks[i].dec); memmove(&P->binks[i], &P->binks[i + 1], (P->nbinks - i - 1) * sizeof *P->binks); P->nbinks--; break; } *h = 0; return 0; }
 /* DirectInput / Direct3D entry points */
 API(direct_input_create) {
     (void)h; if (a[1] != 0x800 || !guid_is(P, a[2], IID_DI8A)) { w32(P, a[3], 0); return DIERR_NOINTERFACE; }
@@ -1750,6 +1772,7 @@ void mh_port_begin_winmain(mh_port *P) {
 }
 void mh_port_destroy(mh_port *P) {
     if (!P) return;
+    for (unsigned i = 0; i < P->nbinks; i++) mh_bink_close(P->binks[i].dec);
     for (unsigned i = 0; i < P->nobjects; i++) free(P->objects[i]);
     for (unsigned i = 0; i < P->nreg; i++) { for (unsigned j = 0; j < P->reg[i].nvalues; j++) free(P->reg[i].values[j].data); free(P->reg[i].values); }
     for (unsigned i = 0; i < P->novfiles; i++) free(P->ovfiles[i].data);
@@ -1835,6 +1858,7 @@ int mh_port_stream(mh_port *P, uint32_t stream, uint32_t *memory, uint32_t *leng
     }
     return 0;
 }
+void mh_port_set_video_decode(mh_port *P, int on) { P->video_decode = on != 0; }
 uint32_t mh_port_stream_version(mh_port *P, uint32_t stream) {
     if (!P->device) return 0;
     for (unsigned i = 0; i < P->device->nstreams; i++) if (P->device->streams[i].stream == stream) {

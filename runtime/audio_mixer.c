@@ -14,6 +14,7 @@ typedef struct {
 struct mh_mixer {
     mh_guest_memory *mem; unsigned rate; float gain;
     pthread_mutex_t lock; voice v[VOICES];
+    int16_t *movie; unsigned movie_cap, movie_head, movie_len, movie_rate; double movie_pos;   /* ring of stereo frames */
 };
 
 static const int8_t MIX_IMA_INDEX[16] = {-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
@@ -116,17 +117,39 @@ void mh_mixer_render(mh_mixer *m, int16_t *out, unsigned frames) {
             v->pos += step;
         }
     }
+    if (m->movie_len && m->movie_rate) {   /* the movie sound, resampled (linear) to the output rate */
+        double step = (double)m->movie_rate / m->rate; int32_t g = (int32_t)(m->gain * 256);
+        for (unsigned f = 0; f < frames && m->movie_pos + 1 < m->movie_len; f++) {
+            unsigned k = (unsigned)m->movie_pos; double t = m->movie_pos - k;
+            const int16_t *a = m->movie + 2 * ((m->movie_head + k) % m->movie_cap), *b = m->movie + 2 * ((m->movie_head + k + 1) % m->movie_cap);
+            acc[2 * f] += (int32_t)((a[0] + (b[0] - a[0]) * t) * g) >> 8; acc[2 * f + 1] += (int32_t)((a[1] + (b[1] - a[1]) * t) * g) >> 8;
+            m->movie_pos += step;
+        }
+        unsigned used = (unsigned)m->movie_pos; if (used > m->movie_len) used = m->movie_len;
+        m->movie_head = (m->movie_head + used) % m->movie_cap; m->movie_len -= used; m->movie_pos -= used;
+    }
     pthread_mutex_unlock(&m->lock);
     for (unsigned i = 0; i < frames * 2; i++) out[i] = (int16_t)(acc[i] < -32768 ? -32768 : acc[i] > 32767 ? 32767 : acc[i]);
     free(acc);
 }
 
 static void mix_on_sound(void *user, mh_port *port, const mh_port_sound *s, int event) { (void)port; mh_mixer_sound(user, s, event); }
+void mh_mixer_movie(mh_mixer *m, const int16_t *pcm, unsigned frames, unsigned rate) {
+    pthread_mutex_lock(&m->lock);
+    if (!pcm) { m->movie_len = 0; m->movie_pos = 0; pthread_mutex_unlock(&m->lock); return; }
+    if (!m->movie) { m->movie_cap = 48000 * 8; m->movie = malloc((size_t)m->movie_cap * 4); if (!m->movie) { m->movie_cap = 0; pthread_mutex_unlock(&m->lock); return; } }
+    if (rate != m->movie_rate) { m->movie_rate = rate; m->movie_len = 0; m->movie_pos = 0; }
+    for (unsigned i = 0; i < frames && m->movie_len < m->movie_cap; i++, m->movie_len++) {
+        unsigned at = (m->movie_head + m->movie_len) % m->movie_cap; m->movie[2 * at] = pcm[2 * i]; m->movie[2 * at + 1] = pcm[2 * i + 1];
+    }
+    pthread_mutex_unlock(&m->lock);
+}
+static void mix_on_movie(void *user, mh_port *port, const int16_t *pcm, unsigned frames, unsigned rate) { (void)port; mh_mixer_movie(user, pcm, frames, rate); }
 mh_mixer *mh_mixer_create(mh_guest_memory *memory, unsigned rate) {
     mh_mixer *m = calloc(1, sizeof *m); if (!m) return NULL;
     m->mem = memory; m->rate = rate ? rate : 48000; m->gain = 0.8f; pthread_mutex_init(&m->lock, NULL);
     return m;
 }
-void mh_mixer_destroy(mh_mixer *m) { if (!m) return; for (int i = 0; i < VOICES; i++) voice_release(&m->v[i]); pthread_mutex_destroy(&m->lock); free(m); }
-void mh_mixer_bind(mh_mixer *m, mh_port_audio *out) { out->user = m; out->sound = mix_on_sound; }
+void mh_mixer_destroy(mh_mixer *m) { if (!m) return; for (int i = 0; i < VOICES; i++) voice_release(&m->v[i]); pthread_mutex_destroy(&m->lock); free(m->movie); free(m); }
+void mh_mixer_bind(mh_mixer *m, mh_port_audio *out) { out->user = m; out->sound = mix_on_sound; out->movie = mix_on_movie; }
 void mh_mixer_set_gain(mh_mixer *m, float gain) { pthread_mutex_lock(&m->lock); m->gain = gain; pthread_mutex_unlock(&m->lock); }

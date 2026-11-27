@@ -75,7 +75,10 @@ typedef struct {
     uint32_t handle, status, format, data, length, rate, bits, channels, samples, block;
     uint32_t loops, loop_start, loop_end, playback_rate; float volume;
 } mh_port_sound;
-typedef struct { void *user; void (*sound)(void *user, mh_port *port, const mh_port_sound *sound, int event); } mh_port_audio;
+/* movie: the sound of a Bink movie (interleaved stereo 16-bit at `rate`), played as it arrives;
+ * pcm NULL ends it. Optional, and only called with video decoding on (mh_port_set_video_decode). */
+typedef struct { void *user; void (*sound)(void *user, mh_port *port, const mh_port_sound *sound, int event);
+                 void (*movie)(void *user, mh_port *port, const int16_t *pcm, unsigned frames, unsigned rate); } mh_port_audio;
 void mh_port_set_audio(mh_port *port, const mh_port_audio *audio);
 void mh_port_set_renderer(mh_port *port, const mh_port_renderer *renderer);
 typedef struct {
@@ -100,6 +103,9 @@ int mh_port_stream(mh_port *port, uint32_t stream, uint32_t *memory, uint32_t *l
 int mh_port_indices(mh_port *port, uint32_t *memory, uint32_t *length, uint32_t *format, uint32_t *base_vertex);
 /* The contents version of the bound vertex buffer of `stream` / index buffer: it changes at every
  * Unlock (unique across reuse of the memory), so a renderer can keep a copy until it changes. */
+/* Movies: decode Bink video into the buffers the game copies (the app; off by default, where
+ * they stay zero as in the x86 reference the translated runs are compared with). */
+void mh_port_set_video_decode(mh_port *port, int on);
 uint32_t mh_port_stream_version(mh_port *port, uint32_t stream);
 uint32_t mh_port_indices_version(mh_port *port);
 
