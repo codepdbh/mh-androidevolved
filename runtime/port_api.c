@@ -100,6 +100,7 @@ struct mh_port {
     /* COM */
     uint32_t com_next; struct { int kind; uint32_t vtable; } ifaces[16]; unsigned nifaces; int iface_of_kind[K_KINDS];
     com_obj **objects; unsigned nobjects, capobjects;
+    com_obj *object_cache[4096];               /* object(): address -> first object with it (the list only grows) */
     uint32_t res_next;
     struct { uint32_t start, end; } *res_free; unsigned nres_free, capres_free;
     uint32_t serial;                           /* resource contents versions, unique across reuse */
@@ -223,8 +224,12 @@ static int interface(mh_port *P, int kind) {
     return (int)index;
 }
 static int iface_for(mh_port *P, int kind) { return P->iface_of_kind[kind] >= 0 ? P->iface_of_kind[kind] : interface(P, kind); }
+/* The first object at `addr`. Objects are only ever appended, so the first match for an address
+ * never changes once found: it is cached (misses are not, an object may be created later). */
 static com_obj *object(mh_port *P, uint32_t addr) {
-    for (unsigned i = 0; i < P->nobjects; i++) if (P->objects[i]->addr == addr) return P->objects[i];
+    com_obj **slot = &P->object_cache[(addr >> 4 ^ addr >> 16) & 4095];
+    if (*slot && (*slot)->addr == addr) return *slot;
+    for (unsigned i = 0; i < P->nobjects; i++) if (P->objects[i]->addr == addr) return *slot = P->objects[i];
     return NULL;
 }
 static com_obj *new_object(mh_port *P, int index) {
@@ -1517,23 +1522,40 @@ API(ail_process_audio) {
     uint32_t block = f[7], length = f[2], limit = size / 2, n = 0;
     const uint8_t *src = length ? mh_mem_span(P->mem, f[1], length) : NULL;
     if (length && !src) fail(P, "ADPCM source outside guest memory");
-    int16_t *out = malloc((size_t)limit * 2 + 2); if (!out && limit) fail(P, "out of host memory");
+    /* IMA ADPCM, tabulated: per (index, nibble) the signed difference and the next index */
+    static int32_t diff_tab[89][16]; static uint8_t next_tab[89][16]; static int ready;
+    if (!ready) {
+        for (int ix = 0; ix < 89; ix++) for (int nib = 0; nib < 16; nib++) {
+            int step = IMA_STEP[ix], diff = step >> 3;
+            if (nib & 4) diff += step; if (nib & 2) diff += step >> 1; if (nib & 1) diff += step >> 2;
+            int nx = ix + IMA_INDEX[nib]; nx = nx < 0 ? 0 : nx > 88 ? 88 : nx;
+            diff_tab[ix][nib] = nib & 8 ? -diff : diff; next_tab[ix][nib] = (uint8_t)nx;
+        }
+        ready = 1;
+    }
+    /* samples written as decoded (little-endian), straight into the guest buffer */
+    uint32_t total = 0;
+    for (uint32_t b = 0; b + block <= length && total < limit; b += block) total += 1 + 2 * (block - 4);
+    if (total > limit) total = limit;
+    uint8_t *le = total ? mh_mem_span(P->mem, dest, 2 * (size_t)total) : NULL;
+    if (total && !le) fail(P, "guest write of %u bytes at 0x%08x", (unsigned)(2 * total), dest);
+    uint8_t *copy = NULL;   /* a source overlapping the output is read from a copy, as if decoded first */
+    if (total && length && (uint64_t)f[1] < (uint64_t)dest + 2 * (uint64_t)total && (uint64_t)dest < (uint64_t)f[1] + length) {
+        copy = malloc(length); if (!copy) fail(P, "out of host memory");
+        memcpy(copy, src, length); src = copy;
+    }
     for (uint32_t b = 0; b + block <= length && n < limit; b += block) {
         int pred = (int16_t)(src[b] | src[b + 1] << 8), index = src[b + 2] > 88 ? 88 : src[b + 2];
-        out[n++] = (int16_t)pred;
-        for (uint32_t i = b + 4; i < b + block; i++)
-            for (int half = 0; half < 2; half++) {
-                int nib = half ? src[i] >> 4 : src[i] & 15, step = IMA_STEP[index], diff = step >> 3;
-                if (nib & 4) diff += step; if (nib & 2) diff += step >> 1; if (nib & 1) diff += step >> 2;
-                pred = nib & 8 ? pred - diff : pred + diff; pred = pred < -32768 ? -32768 : pred > 32767 ? 32767 : pred;
-                index += IMA_INDEX[nib]; index = index < 0 ? 0 : index > 88 ? 88 : index;
-                if (n < limit) out[n++] = (int16_t)pred;
+        le[2 * n] = (uint8_t)pred; le[2 * n + 1] = (uint8_t)((uint16_t)pred >> 8); n++;
+        for (uint32_t i = b + 4; i < b + block && n < limit; i++)
+            for (int half = 0; half < 2 && n < limit; half++) {
+                int nib = half ? src[i] >> 4 : src[i] & 15;
+                pred += diff_tab[index][nib]; pred = pred < -32768 ? -32768 : pred > 32767 ? 32767 : pred;
+                index = next_tab[index][nib];
+                le[2 * n] = (uint8_t)pred; le[2 * n + 1] = (uint8_t)((uint16_t)pred >> 8); n++;
             }
     }
-    uint8_t *le = (uint8_t *)out;   /* in place: little-endian samples */
-    for (uint32_t i = 0; i < n; i++) { uint16_t s = (uint16_t)out[i]; le[2 * i] = (uint8_t)s; le[2 * i + 1] = (uint8_t)(s >> 8); }
-    wbytes(P, dest, le, 2 * (size_t)n);
-    free(out); return 2 * n;
+    free(copy); return 2 * n;
 }
 API(ail_ms_count) { (void)a; (void)h; return (uint32_t)tick(P); }
 API(ail_open_driver) { (void)h; if ((a[1] != 8 && a[1] != 16) || (a[2] != 1 && a[2] != 2)) return 0; P->mss_driver = 0x6D000001u; return P->mss_driver; }

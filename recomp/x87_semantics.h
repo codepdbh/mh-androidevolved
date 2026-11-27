@@ -39,6 +39,11 @@ static inline double mh_x87_div(double a, double b) { return mh_x87_result(a / b
  * are not affected by precision control. */
 static inline double mh_x87_round_pc(double r, uint16_t cw) {
     if (((cw >> 8) & 3) != 0 || r == 0.0 || r != r || isinf(r)) return r;
+    /* Within float's normal range a conversion to float is exactly this rounding (24-bit
+     * significand, to nearest even), and much cheaper. 2^127 keeps a value that rounds up out of
+     * float's range (x87 keeps the wide exponent) on the general path below. */
+    double ar = fabs(r);
+    if (ar >= 0x1p-126 && ar < 0x1p127) return (double)(float)r;
     int e; double m = frexp(r, &e);                 /* r = m * 2^e, 0.5 <= |m| < 1 */
     return ldexp(nearbyint(ldexp(m, 24)), e - 24);
 }

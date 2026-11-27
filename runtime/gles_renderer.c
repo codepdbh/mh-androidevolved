@@ -13,7 +13,7 @@ typedef struct { uint32_t memory, width, height; int fw, fh; GLuint tex, fbo, de
 /* A guest vertex or index buffer kept on the GPU until its contents version changes. */
 typedef struct { uint32_t memory, length, version; GLuint id; } gl_buffer;
 /* Uniform locations of the shared fragment stage. */
-typedef struct { GLint tex, has_tex, color, alpha, tfactor, atest, afunc, aref, flip, fog, fogcolor, fogp; } frag_loc;
+typedef struct { GLint tex, has_tex, color, alpha, tfactor, atest, afunc, aref, flip, fog, fogcolor, fogp, tex1, has_tex1, flip1, s1color, s1alpha; } frag_loc;
 struct mh_gles_renderer {
     mh_guest_memory *mem; void *user; void (*swap)(void *); void (*window_size)(void *, int *, int *);
     uint32_t width, height;                 /* the device's back buffer (Direct3D units) */
@@ -34,14 +34,15 @@ struct mh_gles_renderer {
      * the world-view-projection and the fixed-function lighting in the vertex shader. */
     GLuint program3d, vao3d, vbo_up, ibo_up; int gpu3d;
     GLint u_wvp, u_world, u_vp, u_zk, u_light, u_nlights, u_lights, u_mat, u_ambient, u_csel;
+    GLint u_wv, u_tm0, u_tm1, u_tci, u_ttff;
     gl_buffer buffers[2048]; unsigned nbuffers;
 };
 
 static const char *VERTEX =
     "#version 300 es\n"
     "layout(location=0) in vec4 a_pos; layout(location=1) in vec4 a_diffuse; layout(location=2) in vec4 a_specular; layout(location=3) in vec2 a_uv;\n"
-    "out vec4 v_diffuse; out vec4 v_specular; out vec2 v_uv;\n"
-    "void main(){ gl_Position=a_pos; v_diffuse=a_diffuse; v_specular=a_specular; v_uv=a_uv; }\n";
+    "out vec4 v_diffuse; out vec4 v_specular; out vec2 v_uv; out vec2 v_uv1;\n"
+    "void main(){ gl_Position=a_pos; v_diffuse=a_diffuse; v_specular=a_specular; v_uv=a_uv; v_uv1=a_uv; }\n";
 /* Untransformed vertices: as mh_d3d_assemble (runtime/d3d_common.c) computes them on the CPU, with
  * the clip space mapped like the 2D path (u_vp: ax bx ay by; u_zk: MinZ MaxZ kx). Colours arrive as
  * D3DCOLOR bytes (B G R A). Lights: 6 vec4 each (type range att0 att1 | att2 | diffuse | ambient |
@@ -49,15 +50,24 @@ static const char *VERTEX =
  * diffuse, 2 vertex specular). */
 static const char *VERTEX3D =
     "#version 300 es\n"
-    "layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_normal; layout(location=2) in vec4 a_diffuse; layout(location=3) in vec4 a_specular; layout(location=4) in vec2 a_uv;\n"
+    "layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_normal; layout(location=2) in vec4 a_diffuse; layout(location=3) in vec4 a_specular; layout(location=4) in vec2 a_uv; layout(location=5) in vec2 a_uv1;\n"
+    "uniform mat4 u_wv; uniform mat4 u_tm0; uniform mat4 u_tm1; uniform ivec2 u_tci; uniform ivec2 u_ttff;\n"
     "uniform mat4 u_wvp; uniform mat4 u_world; uniform vec4 u_vp; uniform vec3 u_zk;\n"
     "uniform int u_light; uniform int u_nlights; uniform vec4 u_lights[48]; uniform vec4 u_mat[4]; uniform vec4 u_ambient; uniform ivec3 u_csel;\n"
-    "out vec4 v_diffuse; out vec4 v_specular; out vec2 v_uv;\n"
+    "out vec4 v_diffuse; out vec4 v_specular; out vec2 v_uv; out vec2 v_uv1;\n"
+    "vec2 tcoord(int mode, vec2 src, mat4 tm, int ttff, vec3 cp, vec3 cn){\n"
+    "  vec4 i4 = mode==1 ? vec4(cn,1.0) : mode==2 ? vec4(cp,1.0) : mode==3 ? vec4(reflect(normalize(cp),cn),1.0) : vec4(src,1.0,0.0);\n"
+    "  int cnt=ttff&255; if(cnt==0) return i4.xy;\n"
+    "  vec4 t=tm*i4; if((ttff&256)!=0){ float d = cnt==2 ? t.y : cnt==3 ? t.z : t.w; return d!=0.0 ? t.xy/d : t.xy; } return t.xy; }\n"
     "vec4 pick(int s, vec4 m, vec4 vc, vec4 vs){ return s==1?vc : s==2?vs : m; }\n"
     "void main(){\n"
     "  vec4 c=u_wvp*vec4(a_pos,1.0); float w=c.w;\n"
     "  gl_Position=vec4((u_vp.x*w+u_vp.y*c.x)*u_zk.z, u_vp.z*w+u_vp.w*c.y, (2.0*u_zk.x-1.0)*w+2.0*(u_zk.y-u_zk.x)*c.z, w);\n"
-    "  vec4 dif=a_diffuse.zyxw, spe=a_specular.zyxw; v_specular=spe; v_uv=a_uv;\n"
+    "  vec4 dif=a_diffuse.zyxw, spe=a_specular.zyxw; v_specular=spe;\n"
+    "  if(u_tci.x!=0 || u_tci.y!=0 || u_ttff.x!=0 || u_ttff.y!=0){\n"
+    "    vec3 cp=(u_wv*vec4(a_pos,1.0)).xyz, cn=normalize((u_wv*vec4(a_normal,0.0)).xyz+vec3(0.0,0.0,1e-20));\n"
+    "    v_uv=tcoord(u_tci.x,a_uv,u_tm0,u_ttff.x,cp,cn); v_uv1=tcoord(u_tci.y,a_uv1,u_tm1,u_ttff.y,cp,cn);\n"
+    "  } else { v_uv=a_uv; v_uv1=a_uv1; }\n"
     "  if(u_light==0){ v_diffuse=dif; return; }\n"
     "  vec4 cd=pick(u_csel.x,u_mat[0],dif,spe), ca=pick(u_csel.y,u_mat[1],dif,spe), ce=pick(u_csel.z,u_mat[3],dif,spe);\n"
     "  vec3 wp=(u_world*vec4(a_pos,1.0)).xyz, wn=(u_world*vec4(a_normal,0.0)).xyz; float nl=length(wn); if(nl>0.0) wn/=nl;\n"
@@ -75,24 +85,31 @@ static const char *VERTEX3D =
 /* Stage-0 combine and alpha test: the same rules as runtime/sw_renderer.c. */
 static const char *FRAGMENT =
     "#version 300 es\nprecision highp float; precision highp int;\n"
-    "in vec4 v_diffuse; in vec4 v_specular; in vec2 v_uv;\n"
+    "in vec4 v_diffuse; in vec4 v_specular; in vec2 v_uv; in vec2 v_uv1;\n"
     "uniform sampler2D u_tex; uniform int u_has_tex; uniform ivec3 u_color; uniform ivec3 u_alpha; uniform vec4 u_tfactor;\n"
+    "uniform sampler2D u_tex1; uniform int u_has_tex1; uniform int u_flip1; uniform ivec3 u_s1color; uniform ivec3 u_s1alpha;\n"
     "uniform int u_atest; uniform int u_afunc; uniform float u_aref; uniform int u_flip;\n"
     "uniform int u_fog; uniform vec3 u_fogcolor; uniform vec3 u_fogp;\n"
     "out vec4 o;\n"
-    "vec4 sel(int a, vec4 tex){ int s=a&15; vec4 r = s==2?tex : s==3?u_tfactor : s==4?v_specular : v_diffuse;\n"
+    "vec4 sel(int a, vec4 tex, vec4 cur){ int s=a&15; vec4 r = s==2?tex : s==3?u_tfactor : s==4?v_specular : s==1?cur : v_diffuse;\n"
     "  if((a&0x20)!=0) r=vec4(r.a); if((a&0x10)!=0) r=vec4(1.0)-r; return r; }\n"
-    "float comb(int op,float a,float b,float d){ if(op==1) return d; if(op==2) return a; if(op==3) return b; if(op==4) return a*b;\n"
-    "  if(op==5) return min(1.0,2.0*a*b); if(op==6) return min(1.0,4.0*a*b); if(op==7) return min(1.0,a+b); if(op==8) return clamp(a+b-0.5,0.0,1.0); return a*b; }\n"
+    "vec4 comb(int op, vec4 a, vec4 b, vec4 pass, vec4 tex, vec4 cur){\n"
+    "  if(op==1) return pass; if(op==2) return a; if(op==3) return b; if(op==4) return a*b;\n"
+    "  if(op==5) return min(vec4(1.0),2.0*a*b); if(op==6) return min(vec4(1.0),4.0*a*b); if(op==7) return min(vec4(1.0),a+b);\n"
+    "  if(op==8) return clamp(a+b-0.5,0.0,1.0); if(op==9) return clamp(2.0*(a+b-0.5),0.0,1.0); if(op==10) return clamp(a-b,0.0,1.0);\n"
+    "  if(op==11) return clamp(a+b-a*b,0.0,1.0); if(op==12) return mix(b,a,v_diffuse.a); if(op==13) return mix(b,a,tex.a);\n"
+    "  if(op==14) return mix(b,a,u_tfactor.a); if(op==15) return clamp(a+b*(1.0-tex.a),0.0,1.0); if(op==16) return mix(b,a,cur.a); return a*b; }\n"
     "bool cmpf(int f,float a,float b){ if(f==1) return false; if(f==2) return a<b; if(f==3) return a==b; if(f==4) return a<=b;\n"
     "  if(f==5) return a>b; if(f==6) return a!=b; if(f==7) return a>=b; return true; }\n"
     "void main(){\n"
     "  vec4 tex = u_has_tex!=0 ? texture(u_tex, u_flip!=0 ? vec2(v_uv.x, 1.0-v_uv.y) : v_uv) : vec4(1.0);\n"
     "  int cop = u_color.x; if(u_has_tex==0 && cop!=1 && (u_color.y&15)==2) cop=3;\n"
-    "  vec4 c1=sel(u_color.y,tex), c2=sel(u_color.z,tex);\n"
-    "  vec3 rgb=vec3(comb(cop,c1.r,c2.r,v_diffuse.r), comb(cop,c1.g,c2.g,v_diffuse.g), comb(cop,c1.b,c2.b,v_diffuse.b));\n"
-    "  vec4 a1=sel(u_alpha.y,tex), a2=sel(u_alpha.z,tex);\n"
-    "  float al=comb(u_alpha.x,a1.a,a2.a,v_diffuse.a);\n"
+    "  vec3 rgb=comb(cop, sel(u_color.y,tex,v_diffuse), sel(u_color.z,tex,v_diffuse), v_diffuse, tex, v_diffuse).rgb;\n"
+    "  float al=comb(u_alpha.x, sel(u_alpha.y,tex,v_diffuse), sel(u_alpha.z,tex,v_diffuse), v_diffuse, tex, v_diffuse).a;\n"
+    "  if(u_s1color.x>1){ vec4 cur=vec4(rgb,al);\n"
+    "    vec4 t1 = u_has_tex1!=0 ? texture(u_tex1, u_flip1!=0 ? vec2(v_uv1.x, 1.0-v_uv1.y) : v_uv1) : vec4(1.0);\n"
+    "    rgb=comb(u_s1color.x, sel(u_s1color.y,t1,cur), sel(u_s1color.z,t1,cur), cur, t1, cur).rgb;\n"
+    "    if(u_s1alpha.x>1) al=comb(u_s1alpha.x, sel(u_s1alpha.y,t1,cur), sel(u_s1alpha.z,t1,cur), cur, t1, cur).a; }\n"
     "  if(u_atest!=0 && !cmpf(u_afunc, al*255.0, u_aref)) discard;\n"
     /* fog (see mh_d3d_pixel_state): linear fog with an end <= 1 is on the device depth, the rest on the eye depth (w) */
     "  if(u_fog!=0){ float f;\n"
@@ -109,6 +126,8 @@ static void frag_locs(GLuint p, frag_loc *L) {
     L->tfactor = glGetUniformLocation(p, "u_tfactor"); L->atest = glGetUniformLocation(p, "u_atest");
     L->afunc = glGetUniformLocation(p, "u_afunc"); L->aref = glGetUniformLocation(p, "u_aref"); L->flip = glGetUniformLocation(p, "u_flip");
     L->fog = glGetUniformLocation(p, "u_fog"); L->fogcolor = glGetUniformLocation(p, "u_fogcolor"); L->fogp = glGetUniformLocation(p, "u_fogp");
+    L->tex1 = glGetUniformLocation(p, "u_tex1"); L->has_tex1 = glGetUniformLocation(p, "u_has_tex1"); L->flip1 = glGetUniformLocation(p, "u_flip1");
+    L->s1color = glGetUniformLocation(p, "u_s1color"); L->s1alpha = glGetUniformLocation(p, "u_s1alpha");
 }
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type); glShaderSource(s, 1, &src, NULL); glCompileShader(s);
@@ -133,6 +152,8 @@ static int init_gl(mh_gles_renderer *r) {
             r->u_light = glGetUniformLocation(r->program3d, "u_light"); r->u_nlights = glGetUniformLocation(r->program3d, "u_nlights");
             r->u_lights = glGetUniformLocation(r->program3d, "u_lights"); r->u_mat = glGetUniformLocation(r->program3d, "u_mat");
             r->u_ambient = glGetUniformLocation(r->program3d, "u_ambient"); r->u_csel = glGetUniformLocation(r->program3d, "u_csel");
+            r->u_wv = glGetUniformLocation(r->program3d, "u_wv"); r->u_tm0 = glGetUniformLocation(r->program3d, "u_tm0"); r->u_tm1 = glGetUniformLocation(r->program3d, "u_tm1");
+            r->u_tci = glGetUniformLocation(r->program3d, "u_tci"); r->u_ttff = glGetUniformLocation(r->program3d, "u_ttff");
             glGenVertexArrays(1, &r->vao3d); glGenBuffers(1, &r->vbo_up); glGenBuffers(1, &r->ibo_up);
             r->gpu3d = 1;
         }
@@ -332,6 +353,24 @@ static void mat_mul(const float *a, const float *b, float *o) {   /* row vectors
     for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) o[4 * i + j] = a[4 * i] * b[j] + a[4 * i + 1] * b[4 + j] + a[4 * i + 2] * b[8 + j] + a[4 * i + 3] * b[12 + j];
 }
 static float u2f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+/* Texture stage 1 (the GPU path): its texture on unit 1 and its colour and alpha operations. */
+static void apply_stage1(mh_gles_renderer *r, mh_port *port, const frag_loc *L) {
+    uint32_t cop = mh_port_stage_state(port, 1, 1);
+    glUniform3i(L->s1color, (GLint)cop, (GLint)mh_port_stage_state(port, 1, 2), (GLint)mh_port_stage_state(port, 1, 3));
+    glUniform3i(L->s1alpha, (GLint)mh_port_stage_state(port, 1, 4), (GLint)mh_port_stage_state(port, 1, 5), (GLint)mh_port_stage_state(port, 1, 6));
+    mh_port_texture_info t; int has = cop > 1 && mh_port_texture(port, 1, &t);
+    glUniform1i(L->has_tex1, has); glUniform1i(L->tex1, 1);
+    const gl_target *rt = has ? target_for(r, t.memory[0]) : NULL; glUniform1i(L->flip1, rt != NULL);
+    if (has) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, rt ? rt->tex : texture(r, &t));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mh_port_stage_state(port, 1, 16) == 1 ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mh_port_stage_state(port, 1, 17) == 1 ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(mh_port_stage_state(port, 1, 13)));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(mh_port_stage_state(port, 1, 14)));
+        glActiveTexture(GL_TEXTURE0);
+    }
+}
 /* Untransformed triangles on the GPU. Returns 0 to leave the draw to the CPU path. */
 static int draw3d(mh_gles_renderer *r, mh_port *port, const mh_port_draw_call *call, uint32_t fvf) {
     uint32_t pos = fvf & 0x00e;
@@ -395,12 +434,28 @@ static int draw3d(mh_gles_renderer *r, mh_port *port, const mh_port_draw_call *c
     if (has_n) { glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride, at + off_n); } else { glDisableVertexAttribArray(1); glVertexAttrib4f(1, 0, 0, 0, 0); }
     if (has_d) { glEnableVertexAttribArray(2); glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, (GLsizei)stride, at + off_d); } else { glDisableVertexAttribArray(2); glVertexAttrib4f(2, 1, 1, 1, 1); }
     if (has_s) { glEnableVertexAttribArray(3); glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, (GLsizei)stride, at + off_s); } else { glDisableVertexAttribArray(3); glVertexAttrib4f(3, 0, 0, 0, 0); }
-    if (ntex && off_t + 8 <= stride) { glEnableVertexAttribArray(4); glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, (GLsizei)stride, at + off_t); } else { glDisableVertexAttribArray(4); glVertexAttrib4f(4, 0, 0, 0, 1); }
+    /* texture coordinate sets: D3DFVF_TEXCOORDSIZE gives each set's size (0: 2 floats, 1: 3, 2: 4, 3: 1);
+     * each stage reads the set its D3DTSS_TEXCOORDINDEX names (low word) */
+    uint32_t set_off[8], o2 = off_t;
+    for (int k = 0; k < 8; k++) { set_off[k] = o2; uint32_t sz = (fvf >> (16 + 2 * k)) & 3; o2 += sz == 0 ? 8 : sz == 1 ? 12 : sz == 2 ? 16 : 4; }
+    uint32_t tci0 = mh_port_stage_state(port, 0, 11), tci1 = mh_port_stage_state(port, 1, 11);
+    for (int st = 0; st < 2; st++) {
+        uint32_t idx = (st ? tci1 : tci0) & 0xffff; GLuint loc = st ? 5 : 4;
+        if ((int)idx < ntex && set_off[idx] + 8 <= stride) { glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, 2, GL_FLOAT, GL_FALSE, (GLsizei)stride, at + set_off[idx]); }
+        else { glDisableVertexAttribArray(loc); glVertexAttrib4f(loc, 0, 0, 0, 1); }
+    }
     if (ib) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
     /* transforms and viewport mapping, as the CPU path */
     float world[16], view[16], proj[16], wv[16], wvp[16]; uint32_t vp[6];
     mh_port_transform(port, 256, world); mh_port_transform(port, 2, view); mh_port_transform(port, 3, proj); mh_port_viewport(port, vp);
     mat_mul(world, view, wv); mat_mul(wv, proj, wvp);
+    {   /* texture coordinate generation (camera space) and texture transforms of stages 0 and 1 */
+        float tm0[16], tm1[16];
+        uint32_t f0 = mh_port_stage_state(port, 0, 24), f1 = mh_port_stage_state(port, 1, 24);
+        mh_port_transform(port, 16, tm0); mh_port_transform(port, 17, tm1);
+        glUniformMatrix4fv(r->u_wv, 1, GL_FALSE, wv); glUniformMatrix4fv(r->u_tm0, 1, GL_FALSE, tm0); glUniformMatrix4fv(r->u_tm1, 1, GL_FALSE, tm1);
+        glUniform2i(r->u_tci, (GLint)(tci0 >> 16 & 3), (GLint)(tci1 >> 16 & 3)); glUniform2i(r->u_ttff, (GLint)(f0 & 0x1ff), (GLint)(f1 & 0x1ff));
+    }
     glUniformMatrix4fv(r->u_wvp, 1, GL_FALSE, wvp); glUniformMatrix4fv(r->u_world, 1, GL_FALSE, world);
     glUniform4f(r->u_vp, ((float)vp[0] + vp[2] * 0.5f + 0.5f) / (float)r->cw * 2.0f - 1.0f, (float)vp[2] / (float)r->cw,
                 1.0f - ((float)vp[1] + vp[3] * 0.5f + 0.5f) / (float)r->ch * 2.0f, (float)vp[3] / (float)r->ch);
@@ -428,6 +483,7 @@ static int draw3d(mh_gles_renderer *r, mh_port *port, const mh_port_draw_call *c
     }
     mh_d3d_pixel_state s; mh_d3d_pixel_state_get(port, &s);
     apply_state(r, &r->f3d, &s, 1);
+    apply_stage1(r, port, &r->f3d);
     if (ib) glDrawElements(mode, (GLsizei)nidx, ifmt == 102 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT, (const void *)(uintptr_t)((size_t)istart * (ifmt == 102 ? 4 : 2)));
     else glDrawArrays(mode, 0, (GLsizei)nidx);
     glDisable(GL_CULL_FACE);
