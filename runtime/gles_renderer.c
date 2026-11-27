@@ -331,6 +331,12 @@ static void apply_state(mh_gles_renderer *r, const frag_loc *L, const mh_d3d_pix
     } else glDisable(GL_BLEND);
     if (s->z_test) { glEnable(GL_DEPTH_TEST); glDepthFunc(gl_compare(s->z_func)); } else glDisable(GL_DEPTH_TEST);
     glDepthMask(s->z_write ? GL_TRUE : GL_FALSE);
+    /* Projected shadows: the game draws them over copies of the floor polygons (transformed with
+     * another matrix), depth-tested LESSEQUAL without writing depth. Their depth differs from the
+     * floor's by rounding, and on the GPU most of the shadow lost the test. Such decals (a render
+     * target sampled, blended, depth-tested, not written) are pulled slightly towards the eye. */
+    if (rt && s->blend && s->z_test && !s->z_write) { glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(-1.0f, -4.0f); }
+    else glDisable(GL_POLYGON_OFFSET_FILL);
     /* Direct3D culls in screen space with y down; GL clip space has y up, so its winding is reversed:
      * D3DCULL_CW (2) removes GL back faces and D3DCULL_CCW (3) GL front faces (glFrontFace CCW). */
     if (gl_cull && (s->cull == 2 || s->cull == 3)) { glEnable(GL_CULL_FACE); glFrontFace(GL_CCW); glCullFace(s->cull == 2 ? GL_BACK : GL_FRONT); }
