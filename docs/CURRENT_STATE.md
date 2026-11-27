@@ -1,6 +1,6 @@
 # Estado vigente — 27 de noviembre de 2026
 
-El port ejecuta el arranque, el menú, las cinemáticas del motor y el primer nivel como código traducido en el Galaxy S25 Ultra. En la partida va a 65–74 fps, con HUD, efecto de cámara, niebla, sombras y luces. Los vídeos Bink todavía no se decodifican. La cobertura está limitada a las rutas traducidas: una sesión libre todavía puede alcanzar una función pendiente y detenerse (la parada es controlada).
+El port ejecuta el arranque, el menú, las cinemáticas del motor y el primer nivel como código traducido en el Galaxy S25 Ultra. En la partida va a 65–74 fps, con HUD, efecto de cámara, niebla, sombras y luces. Los vídeos Bink se reproducen con imagen y sonido. La cobertura está limitada a las rutas traducidas: una sesión libre todavía puede alcanzar una función pendiente y detenerse (la parada es controlada).
 
 ## Implementación
 
@@ -38,7 +38,7 @@ El port ejecuta el arranque, el menú, las cinemáticas del motor y el primer ni
 
 ## Pendiente
 
-- **Vídeos Bink** (21 archivos Bink 1, 512×512, con audio): hoy se reproducen en negro y en silencio durante su duración real. Hace falta un decodificador de vídeo y audio Bink 1.
+- **Vídeos Bink** (21 archivos Bink 1, 512×512, con audio): decodificados desde el 27-11. Pendiente revisar al oído el volumen y la sincronía.
 - La iluminación y las sombras siguen pendientes de comparar con el juego original en PC, que no se ejecuta en este equipo por las reglas del proyecto.
 - Sesiones largas fuera del primer nivel: pueden aparecer funciones no traducidas o efectos sin implementar (ver `KNOWN_ISSUES.md`).
 

@@ -2,7 +2,7 @@
 
 ## Visibles en el juego
 
-- **Vídeos Bink en negro.** `BinkOpen`, `BinkWait`, `BinkNextFrame` y el resto se emulan con la duración real de cada vídeo, pero sin decodificar: los 21 vídeos (Bink 1, 512×512, con audio) se ven en negro y sin sonido. Afecta a las introducciones y finales de nivel y a los títulos.
+- **Vídeos Bink:** se decodifican vídeo y audio en la app (`runtime/bink_decoder.c`). En el S25 se ha visto la introducción del primer nivel. Falta comprobar al oído el nivel y la sincronía del sonido, que se calibró por medición. En los recorridos comparados con x86 los buffers del vídeo siguen a cero, como en la referencia.
 - **El HUD queda bajo los controles táctiles.** En modo panorámico las barras, la silueta y el radar caen en la esquina inferior derecha, debajo de los botones.
 - **Iluminación sin referencia directa.** Están implementadas las luces puntuales, direccionales y de foco por vértice, la etapa de textura 1, la generación de coordenadas en espacio de cámara y la niebla. No se ha podido comparar con el juego original en PC: las reglas del proyecto impiden ejecutarlo.
 - **Funciones aún no implementadas en los renderers:**
