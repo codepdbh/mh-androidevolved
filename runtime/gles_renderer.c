@@ -45,7 +45,7 @@ static const char *VERTEX =
     "void main(){ gl_Position=a_pos; v_diffuse=a_diffuse; v_specular=a_specular; v_uv=a_uv; v_uv1=a_uv; }\n";
 /* Untransformed vertices: as mh_d3d_assemble (runtime/d3d_common.c) computes them on the CPU, with
  * the clip space mapped like the 2D path (u_vp: ax bx ay by; u_zk: MinZ MaxZ kx). Colours arrive as
- * D3DCOLOR bytes (B G R A). Lights: 6 vec4 each (type range att0 att1 | att2 | diffuse | ambient |
+ * D3DCOLOR bytes (B G R A). Lights: 6 vec4 each (type range att0 att1 | att2 falloff cos(theta/2) cos(phi/2) | diffuse | ambient |
  * position | direction); u_csel: the colour source of diffuse/ambient/emissive (0 material, 1 vertex
  * diffuse, 2 vertex specular). */
 static const char *VERTEX3D =
@@ -76,7 +76,9 @@ static const char *VERTEX3D =
     "    vec4 p0=u_lights[6*i]; vec3 dir; float att=1.0;\n"
     "    if(p0.x==3.0) dir=-u_lights[6*i+5].xyz;\n"
     "    else { dir=u_lights[6*i+4].xyz-wp; float d=length(dir); if(p0.y>0.0 && d>p0.y) continue;\n"
-    "           float den=p0.z+p0.w*d+u_lights[6*i+1].x*d*d; att=den>0.0?1.0/den:1.0; if(d>0.0) dir/=d; }\n"
+    "           float den=p0.z+p0.w*d+u_lights[6*i+1].x*d*d; att=den>0.0?1.0/den:1.0; if(d>0.0) dir/=d;\n"
+    "           if(p0.x==2.0){ vec4 sp=u_lights[6*i+1]; float rho=dot(normalize(-u_lights[6*i+5].xyz), dir);\n"
+    "             att*= rho>sp.z ? 1.0 : rho<=sp.w ? 0.0 : pow(clamp((rho-sp.w)/max(sp.z-sp.w,1e-6),0.0,1.0), sp.y); } }\n"
     "    float dl=length(dir); if(dl>0.0) dir/=dl;\n"
     "    float k=max(dot(wn,dir),0.0);\n"
     "    col+=att*(u_lights[6*i+3].rgb*ca.rgb+u_lights[6*i+2].rgb*cd.rgb*k); }\n"
@@ -469,7 +471,8 @@ static int draw3d(mh_gles_renderer *r, mh_port *port, const mh_port_draw_call *c
         for (unsigned i = 0; i < n; i++) {
             float *q = L[6 * i];
             q[0] = (float)raw[i][0]; q[1] = u2f(raw[i][19]); q[2] = u2f(raw[i][21]); q[3] = u2f(raw[i][22]);
-            L[6 * i + 1][0] = u2f(raw[i][23]);
+            L[6 * i + 1][0] = u2f(raw[i][23]); L[6 * i + 1][1] = u2f(raw[i][20]);   /* att2, falloff, cos(theta/2), cos(phi/2) */
+            L[6 * i + 1][2] = cosf(u2f(raw[i][24]) * 0.5f); L[6 * i + 1][3] = cosf(u2f(raw[i][25]) * 0.5f);
             for (int k = 0; k < 3; k++) { L[6 * i + 2][k] = u2f(raw[i][1 + k]); L[6 * i + 3][k] = u2f(raw[i][9 + k]); L[6 * i + 4][k] = u2f(raw[i][13 + k]); L[6 * i + 5][k] = u2f(raw[i][16 + k]); }
         }
         float M[4][4]; for (int i = 0; i < 16; i++) M[i / 4][i % 4] = u2f(m[i]);
