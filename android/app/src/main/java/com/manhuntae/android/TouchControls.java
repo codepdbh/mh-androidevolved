@@ -58,8 +58,8 @@ final class TouchControls extends View {
             new Button("OK", ENTER, 26, false), new Button("Mirar", F, 24, false), new Button("Inv.", TAB, 24, false), new Button("Rec.", R, 24, false),
         };
         fill.setStyle(Paint.Style.FILL);
-        ring.setStyle(Paint.Style.STROKE); ring.setStrokeWidth(2 * density); ring.setColor(Color.argb(150, 230, 230, 220));
-        text.setColor(Color.argb(220, 240, 240, 230)); text.setTextAlign(Paint.Align.CENTER); text.setFakeBoldText(true);
+        ring.setStyle(Paint.Style.STROKE); ring.setStrokeWidth(2 * density); ring.setColor(Color.argb(95, 230, 230, 220));   // light: the HUD (bottom right) shows through
+        text.setColor(Color.argb(150, 240, 240, 230)); text.setTextAlign(Paint.Align.CENTER); text.setFakeBoldText(true);
     }
 
     @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
@@ -85,7 +85,7 @@ final class TouchControls extends View {
         fill.setColor(stickPointer >= 0 ? Color.argb(150, 200, 60, 50) : Color.argb(90, 200, 200, 190)); canvas.drawCircle(knobX, knobY, 28 * density, fill);
         for (Button b : buttons) {
             boolean on = b.pressed > 0 || b.latched;
-            fill.setColor(on ? Color.argb(150, 200, 60, 50) : Color.argb(70, 20, 20, 20));
+            fill.setColor(on ? Color.argb(120, 200, 60, 50) : Color.argb(25, 20, 20, 20));
             float r = b.radius * density;
             canvas.drawCircle(b.x, b.y, r, fill); canvas.drawCircle(b.x, b.y, r, ring);
             text.setTextSize((b.label.length() > 4 ? 12 : 14) * density);

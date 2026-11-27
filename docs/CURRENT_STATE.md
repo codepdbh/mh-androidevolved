@@ -1,38 +1,50 @@
-# Estado vigente — 26 de noviembre de 2026
+# Estado vigente — 27 de noviembre de 2026
 
-El port ejecuta el arranque, el menú y recorridos del primer nivel como código traducido. Tiene backend OpenGL ES, entrada táctil y guardado separado de los datos originales. La cobertura está limitada a las rutas traducidas: una sesión libre todavía puede alcanzar una función pendiente y detenerse. No se ha validado el juego completo.
+El port ejecuta el arranque, el menú, las cinemáticas del motor y el primer nivel como código traducido en el Galaxy S25 Ultra. En la partida va a 65–74 fps, con HUD, efecto de cámara, niebla, sombras y luces. Los vídeos Bink todavía no se decodifican. La cobertura está limitada a las rutas traducidas: una sesión libre todavía puede alcanzar una función pendiente y detenerse (la parada es controlada).
 
 ## Implementación
 
-- Unidad privada de 4692 funciones traducidas. Arranque CRT, inicializadores y WinMain compartidos entre el arnés de comparación y la app.
-- Backend OpenGL ES 3, iluminación, texturas y superficies de render. Cambios recientes: conservar coordenadas de recorte y ofrecer 4:3, imagen estirada o panorámica.
-- Controles táctiles de movimiento, cámara y acciones. Buzón con mutex entre la interfaz y el hilo del juego para conservar toques cortos y evitar escrituras concurrentes en el estado del port.
-- Guardado en superposición: la app escribe en su almacenamiento privado. Escritura temporal, sincronización y reemplazo comprobados; errores de persistencia comunicados por la API.
-- Mezclador y salida AAudio implementados. Falta una comprobación de escucha y sincronización durante una sesión prolongada.
-- Compilación de la biblioteca y empaquetado vinculados por hashes a las fuentes y referencias validadas. Los manifiestos antiguos requieren repetir la validación.
+- **Traducción**: 11395 funciones, compiladas en 8 partes. Son todas las alcanzables desde el código ejecutado, las tablas de datos y los inmediatos de código.
+- **Memoria del código traducido**: la comprobación de rango de cada acceso es inline y los accesos no son `volatile`. `MH_RECOMP_VOLATILE_MEMORY` restaura los accesos `volatile` del original.
+- **x87**: el redondeo a 24 bits, la precisión que fija Direct3D, se hace con una conversión a `float` en el rango normal. Fuera de ese rango se usa `frexp`/`ldexp`.
+- **Direct3D 8 → OpenGL ES 3**:
+  - Los triángulos 3D se dibujan con los buffers del juego, guardados en la GPU según su versión de contenido. La transformación y la iluminación fija (luces puntuales, direccionales y de foco) están en el shader de vértices.
+  - Etapas de textura 0 y 1 con las operaciones habituales, generación de coordenadas en espacio de cámara y matrices de textura.
+  - Niebla de tabla y de vértice, render targets y culling por GL.
+  - Lo pretransformado (HUD, superposiciones) va por CPU y en lotes:
+    - La z se limita a [0,1], porque Direct3D no recorta esos vértices.
+    - En render targets se ajustan los bordes de píxel, para cubrir lo mismo a cualquier escala.
+    - Las líneas y los puntos pretransformados se dibujan como quads de 1 píxel; así salen las líneas de la cámara.
+- **Audio**: Miles (IMA ADPCM con tablas exactas), mezclador y AAudio.
+- **Entrada y guardado**: controles táctiles; partidas guardadas en el almacenamiento privado de la app, separadas de los datos originales.
+- **Reloj**: virtual (determinista), o en tiempo real desde el launcher (opción experimental fuera de los recorridos validados).
+- **Diagnóstico** (`adb shell setprop`):
+  - `debug.mh.skip`: omite categorías de dibujos.
+  - `debug.mh.log`: registra cada dibujo de un fotograma.
+  - `debug.mh.dump`: vuelca los render targets a PPM.
+  - El registro `perf` desglosa el tiempo de dibujo.
 
 ## Compilación y pruebas
 
-- 26-11: **traducción completa (7658 funciones) validada en las dos plataformas** con el NDK 29.0.14206865, el único instalado: 18 escenarios idénticos a x86 en Windows x64 y en el S25. El S25 se desconectó de ADB tras 10 escenarios; `resume_winmain_on_s25()` confirmó la limpieza del intento interrumpido y completó los 8 restantes.
-- 26-11: compilados `libmh_game.so` (SHA-256 `862d9b91…`) y `libmh_runtime.so` con el NDK 29. Hubo que borrar la caché de CMake, que seguía apuntando al NDK 28.2. La APK privada se actualizó en el S25 conservando datos y partidas, y `launch_game_on_s25()` abrió el juego. Se corrigió la búsqueda del botón «Jugar», que Android muestra en mayúsculas.
-- 26-11: en el S25 el juego muestra el menú principal en español con los controles táctiles. Corre a 45,4 fps estables (por fotograma: 15,5 ms de código traducido, 0,24 ms de dibujo y unos 6 ms de espera del limitador) y sin errores en el registro. La captura se guarda en `private/` porque contiene imágenes del juego.
-- 23-11: 17 escenarios comparados con x86 en Windows x64 y Android ARM64 en el S25, incluidos el primer nivel, acciones y guardar. Se instaló la APK de ese estado. Ver `evidence/FIRST_FRAME.md`.
-- 24-11: los mismos 17 escenarios vuelven a coincidir en Windows con los cambios actuales. Compiló el ejecutable ARM64 y pasaron 16 escenarios en el S25. Durante el último, `save`, desapareció el S25 de ADB; quedaron pendientes esa ejecución y la confirmación de limpieza de su directorio temporal.
-- 24-11: 54 comprobaciones sintéticas de persistencia pasaron tanto en Windows como en el S25, con reapertura, reemplazo, archivos vacíos y fallos; limpieza confirmada.
-- 24-11: 274 comprobaciones sintéticas de entrada pasaron en Windows y en el S25; limpieza confirmada.
-- 24-11: 48 pruebas Python pasaron. Java compiló y la unidad JNI actual pasó la comprobación de sintaxis del NDK.
-- 24-11: compilaron `libmh_game.so` y la APK privada preparada; esta última pasó la verificación de firma. No se instaló. Los manifiestos conservan sus hashes y fuentes, con la validación del S25 todavía pendiente.
-- 24-11: se recuperó un punto de reanudación tras comparar de nuevo los 17 resultados de Windows y los 16 completos del S25. Las siguientes tandas guardan automáticamente sus puntos de reanudación; fuentes, binarios o resultados cambiados impiden reutilizarlos.
-- 24-11: análisis estático de siete entradas adicionales: ocho funciones y 625 instrucciones generadas en una unidad privada independiente. Compiló como objeto ARM64, sin enlazar ni ejecutar. Detectó dependencias todavía ausentes: `DeleteFileA` y `SetFileAttributesA`. No altera la APK preparada.
+- 27-11: los cambios de memoria inline/no-`volatile`, la caché de objetos COM, x87 y ADPCM se validaron dos veces. En cada ciclo, 18 escenarios dieron resultados idénticos a x86 en Windows x64 y en el S25.
+- 27-11, S25, primer nivel: 65–74 fps. Por fotograma: ~12 ms de código traducido y ~1,5 ms de dibujo. El 26-11 eran 22–43 fps, con 15–19 ms de código y 9–27 ms de dibujo.
+- 27-11, perfil con simpleperf antes de estas optimizaciones:
+  - 21 % de la CPU en la decodificación ADPCM;
+  - 13 % en la búsqueda lineal de objetos COM;
+  - 10 % en `frexp`/`ldexp` del redondeo x87;
+  - el resto, código del juego.
+- 27-11: prueba de estabilidad en el S25 caminando, corriendo, girando la cámara, atacando y usando objetos. 30 rondas sin caídas; la prueba larga de 90 rondas se documenta en `STATUS.md`.
+- 26-11: HUD, efecto de cámara y sombra corregidos y comprobados en el S25 con capturas, guardadas en `private/` porque contienen imágenes del juego.
 
-Estas pruebas sintéticas no certifican cargar una partida real desde el menú ni una sesión prolongada. Ver `evidence/S25_SAVE_PERSISTENCE.md`.
+## Pendiente
 
-## Pendiente de esta sesión
-
-ADB detecta ahora un Redmi Note 8, no el S25. Se solicitó reconectar el S25; no se subieron pruebas al Redmi. La comprobación del modelo precede ahora a cualquier subida del ejecutor genérico.
-
-Con el S25 disponible: `resume_winmain_on_s25()` confirma la limpieza del intento interrumpido y repite el escenario pendiente; después `promote_prepared_game_library()` y `finalize_prepared_apk()` comprueban los artefactos ya compilados. `update_diagnostic_on_s25()` conserva los datos de la app, y `launch_game_on_s25()` abre el juego para la prueba visible. Comprobar rendimiento, controles y paradas por código aún no traducido. Guardar, cerrar la app y cargar una partida real requiere evidencia adicional.
+- **Vídeos Bink** (21 archivos Bink 1, 512×512, con audio): hoy se reproducen en negro y en silencio durante su duración real. Hace falta un decodificador de vídeo y audio Bink 1.
+- La iluminación y las sombras siguen pendientes de comparar con el juego original en PC, que no se ejecuta en este equipo por las reglas del proyecto.
+- Sesiones largas fuera del primer nivel: pueden aparecer funciones no traducidas o efectos sin implementar (ver `KNOWN_ISSUES.md`).
 
 ## Reglas y límites
 
-El modo de trabajo seguro permanece activo: procesos supervisados por `scripts/worksafe.py`, límites de recursos, ninguna ejecución nativa del juego original ni herramientas gráficas en el PC. Los archivos originales no se modifican. Código traducido, bibliotecas, APK y capturas con contenido del juego permanecen privados. El historial técnico anterior está en `STATUS.md`; los bloqueos antiguos pueden estar resueltos por avances posteriores.
+- El modo de trabajo seguro permanece activo: procesos supervisados por `scripts/worksafe.py`, límites de recursos y ninguna ejecución nativa del juego original ni de herramientas gráficas en el PC.
+- Los archivos originales no se modifican.
+- Código traducido, bibliotecas, APK y capturas con contenido del juego permanecen privados.
+- El historial técnico anterior está en `STATUS.md`.

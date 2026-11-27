@@ -43,7 +43,7 @@ public final class MainActivity extends Activity {
             System.loadLibrary("mh_runtime");
             return nativeGetRuntimeDiagnostic() + "\n\n" + nativeRunSelfTest();
         } catch (LinkageError | SecurityException e) {
-            return "Diagnóstico nativo no disponible; juego no disponible.";
+            return "Diagnóstico nativo no disponible.";
         }
     }
 
@@ -58,7 +58,7 @@ public final class MainActivity extends Activity {
         scroll.addView(layout); setContentView(scroll);
         layout.addView(text("MANHUNT", 30, Color.rgb(231, 231, 219)));
         layout.addView(text("ANDROID EVOLVED · PROTOTIPO DE INVESTIGACIÓN", 12, Color.rgb(199, 108, 94)));
-        layout.addView(text("El juego aún no funciona en Android. Los datos del juego no se han verificado por completo.", 16, Color.LTGRAY));
+        layout.addView(text("Versión en desarrollo: el menú, las cinemáticas del motor y el primer nivel funcionan. Los vídeos todavía se ven en negro y el juego puede detenerse en zonas aún no traducidas.", 16, Color.LTGRAY));
         layout.addView(text(runtimeDiagnostic(), 14, Color.LTGRAY));
         folderStatus = text("", 14, Color.LTGRAY); layout.addView(folderStatus); updateFolderStatus();
         if (hasFolderPermission()) validateFolder(Uri.parse(preferences.getString("tree", "")));

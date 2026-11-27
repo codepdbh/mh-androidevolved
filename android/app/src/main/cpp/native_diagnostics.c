@@ -17,8 +17,8 @@ Java_com_manhuntae_android_MainActivity_nativeGetRuntimeDiagnostic(JNIEnv *env, 
                    mh_mem_read_u32(&region, 0x1001, &result) &&
                    result == UINT32_C(0x12345678) &&
                    !mh_mem_write_u32(&region, 0x1005, 0);
-    return (*env)->NewStringUTF(env, ok ? "Memoria nativa: comprobación básica correcta; juego no disponible."
-                                        : "Memoria nativa: la comprobación básica falló; juego no disponible.");
+    return (*env)->NewStringUTF(env, ok ? "Memoria nativa: comprobación básica correcta."
+                                        : "Memoria nativa: la comprobación básica falló.");
 }
 
 /* The Java caller checks the hash twice. This maps bytes only; it executes none. */
@@ -44,6 +44,6 @@ Java_com_manhuntae_android_MainActivity_nativeInspectKnownPe(JNIEnv *env, jclass
              mh_pe32_visit_imports(&region, &info, NULL, NULL, &imports) && imports == 165;
     free(image);
     (*env)->ReleaseByteArrayElements(env, executable, bytes, JNI_ABORT);
-    return (*env)->NewStringUTF(env, ok ? "Ejecutable identificado; estructura PE e importaciones comprobadas. Los demás datos no están verificados; el juego no está disponible."
+    return (*env)->NewStringUTF(env, ok ? "Ejecutable identificado; estructura PE e importaciones comprobadas."
                                         : "Ejecutable identificado, pero falló la comprobación PE. El juego no está disponible.");
 }
